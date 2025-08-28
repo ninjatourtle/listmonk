@@ -7,6 +7,8 @@ import (
 	"net/smtp"
 	"net/textproto"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/knadh/listmonk/models"
 	"github.com/knadh/smtppool/v2"
@@ -31,6 +33,14 @@ type Server struct {
 	TLSSkipVerify bool              `json:"tls_skip_verify"`
 	EmailHeaders  map[string]string `json:"email_headers"`
 
+	// Optional limits.
+	DailyLimit int    `json:"daily_limit"`
+	SendPause  string `json:"send_pause"`
+
+	SentTotal int64 `json:"-"`
+	SentToday int64 `json:"-"`
+	lastDay   string
+
 	// Rest of the options are embedded directly from the smtppool lib.
 	// The JSON tag is for config unmarshal to work.
 	//lint:ignore SA5008 ,squash is needed by koanf/mapstructure config unmarshal.
@@ -43,6 +53,11 @@ type Server struct {
 type Emailer struct {
 	servers []*Server
 	name    string
+}
+
+// Servers returns the list of configured servers.
+func (e *Emailer) Servers() []*Server {
+	return e.servers
 }
 
 // New returns an SMTP e-mail Messenger backend with the given SMTP servers.
@@ -121,6 +136,23 @@ func (e *Emailer) Push(m models.Message) error {
 		srv = e.servers[0]
 	}
 
+	// Reset daily counter if needed.
+	today := time.Now().Format("2006-01-02")
+	if srv.lastDay != today {
+		atomic.StoreInt64(&srv.SentToday, 0)
+		srv.lastDay = today
+	}
+
+	if srv.DailyLimit > 0 && atomic.LoadInt64(&srv.SentToday) >= int64(srv.DailyLimit) {
+		return fmt.Errorf("smtp daily limit reached")
+	}
+
+	if srv.SendPause != "" {
+		if d, err := time.ParseDuration(srv.SendPause); err == nil {
+			time.Sleep(d)
+		}
+	}
+
 	// Are there attachments?
 	var files []smtppool.Attachment
 	if m.Attachments != nil {
@@ -189,7 +221,12 @@ func (e *Emailer) Push(m models.Message) error {
 		}
 	}
 
-	return srv.pool.Send(em)
+	if err := srv.pool.Send(em); err != nil {
+		return err
+	}
+	atomic.AddInt64(&srv.SentTotal, 1)
+	atomic.AddInt64(&srv.SentToday, 1)
+	return nil
 }
 
 // Flush flushes the message queue to the server.

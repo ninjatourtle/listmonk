@@ -313,6 +313,7 @@
     "menu.forms": "Формы",
     "menu.import": "Импорт",
     "menu.logs": "Журналы",
+    "menu.smtpStats": "Статистика SMTP",
     "menu.maintenance": "Обслуживание",
     "menu.media": "Медиа",
     "menu.newCampaign": "Создать новую",
@@ -657,5 +658,10 @@
     "users.userRole": "Роль пользователя | Роли пользователя",
     "users.userRoles": "Роли пользователя",
     "users.username": "Имя пользователя",
-    "users.usernameHelp": "Используется для входа по паролю"
+    "users.usernameHelp": "Используется для входа по паролю",
+    "smtp.stats.title": "Статистика SMTP",
+    "smtp.stats.total": "Всего отправлено",
+    "smtp.stats.today": "Отправлено сегодня",
+    "smtp.stats.dailyLimit": "Дневной лимит",
+    "smtp.stats.sendPause": "Пауза отправки"
 }

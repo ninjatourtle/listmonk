@@ -313,6 +313,7 @@
     "menu.forms": "Forms",
     "menu.import": "Import",
     "menu.logs": "Logs",
+    "menu.smtpStats": "SMTP stats",
     "menu.maintenance": "Maintenance",
     "menu.media": "Media",
     "menu.newCampaign": "Create new",
@@ -657,5 +658,10 @@
     "users.userRole": "User role | User roles",
     "users.userRoles": "User roles",
     "users.username": "Username",
-    "users.usernameHelp": "Used with password login"
+    "users.usernameHelp": "Used with password login",
+    "smtp.stats.title": "SMTP statistics",
+    "smtp.stats.total": "Total sent",
+    "smtp.stats.today": "Sent today",
+    "smtp.stats.dailyLimit": "Daily limit",
+    "smtp.stats.sendPause": "Send pause"
 }

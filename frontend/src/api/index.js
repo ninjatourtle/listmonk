@@ -422,6 +422,17 @@ export const testSMTP = async (data) => http.post(
   { loading: models.settings, disableToast: true },
 );
 
+export const getSMTPStats = async () => http.get(
+  '/api/settings/smtp/stats',
+  { loading: models.settings },
+);
+
+export const updateSMTPServer = async (name, data) => http.put(
+  `/api/settings/smtp/${name}`,
+  data,
+  { loading: models.settings },
+);
+
 export const getLogs = async () => http.get(
   '/api/logs',
   { loading: models.logs, camelCase: false },
