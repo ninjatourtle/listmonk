@@ -100,6 +100,8 @@ func initHTTPHandlers(e *echo.Echo, a *App) {
 		g.GET("/api/settings", pm(a.GetSettings, "settings:get"))
 		g.PUT("/api/settings", pm(a.UpdateSettings, "settings:manage"))
 		g.POST("/api/settings/smtp/test", pm(a.TestSMTPSettings, "settings:manage"))
+		g.GET("/api/settings/smtp/stats", pm(a.GetSMTPStats, "settings:get"))
+		g.PUT("/api/settings/smtp/:name", pm(a.UpdateSMTPServer, "settings:manage"))
 		g.POST("/api/admin/reload", pm(a.ReloadApp, "settings:manage"))
 		g.GET("/api/logs", pm(a.GetLogs, "settings:get"))
 		g.GET("/api/events", pm(a.EventStream, "settings:get"))

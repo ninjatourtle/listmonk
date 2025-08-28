@@ -360,3 +360,73 @@ func (a *App) GetAboutInfo(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, out)
 }
+
+type smtpStat struct {
+	Name       string `json:"name"`
+	SentTotal  int64  `json:"sent_total"`
+	SentToday  int64  `json:"sent_today"`
+	DailyLimit int    `json:"daily_limit"`
+	SendPause  string `json:"send_pause"`
+}
+
+// GetSMTPStats returns stats for configured SMTP servers.
+func (a *App) GetSMTPStats(c echo.Context) error {
+	msgr := a.emailMsgr.(*email.Emailer)
+	var out []smtpStat
+	for _, s := range msgr.Servers() {
+		out = append(out, smtpStat{
+			Name:       s.Name,
+			SentTotal:  s.SentTotal,
+			SentToday:  s.SentToday,
+			DailyLimit: s.DailyLimit,
+			SendPause:  s.SendPause,
+		})
+	}
+	return c.JSON(http.StatusOK, okResp{out})
+}
+
+type smtpUpdate struct {
+	DailyLimit int    `json:"daily_limit"`
+	SendPause  string `json:"send_pause"`
+}
+
+// UpdateSMTPServer updates per-server limits.
+func (a *App) UpdateSMTPServer(c echo.Context) error {
+	name := c.Param("name")
+	var req smtpUpdate
+	if err := c.Bind(&req); err != nil {
+		return err
+	}
+
+	// Update settings in DB.
+	msgr := a.emailMsgr.(*email.Emailer)
+	set, err := a.core.GetSettings()
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range set.SMTP {
+		if set.SMTP[i].Name == name {
+			set.SMTP[i].DailyLimit = req.DailyLimit
+			set.SMTP[i].SendPause = req.SendPause
+			found = true
+			break
+		}
+	}
+	if !found {
+		return echo.NewHTTPError(http.StatusNotFound, "smtp not found")
+	}
+	if err := a.core.UpdateSettings(set); err != nil {
+		return err
+	}
+
+	// Update in-memory server.
+	for _, s := range msgr.Servers() {
+		if s.Name == name {
+			s.DailyLimit = req.DailyLimit
+			s.SendPause = req.SendPause
+		}
+	}
+
+	return c.JSON(http.StatusOK, okResp{"ok"})
+}

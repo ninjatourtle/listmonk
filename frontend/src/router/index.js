@@ -114,6 +114,12 @@ const routes = [
     component: () => import('../views/Logs.vue'),
   },
   {
+    path: '/smtp-stats',
+    name: 'smtpStats',
+    meta: { title: 'smtp.stats.title' },
+    component: () => import('../views/SmtpStats.vue'),
+  },
+  {
     path: '/users',
     name: 'users',
     meta: { title: 'globals.terms.users', group: 'users' },

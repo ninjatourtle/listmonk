@@ -3,6 +3,9 @@
     <b-menu-item :to="{ name: 'dashboard' }" tag="router-link" :active="activeItem.dashboard"
       icon="view-dashboard-variant-outline" :label="$t('menu.dashboard')" /><!-- dashboard -->
 
+    <b-menu-item v-if="$can('settings:get')" :to="{ name: 'smtpStats' }" tag="router-link"
+      :active="activeItem.smtpStats" data-cy="smtp-stats" icon="email" :label="$t('menu.smtpStats')" />
+
     <b-menu-item :expanded="activeGroup.lists" :active="activeGroup.lists" data-cy="lists"
       @update:active="(state) => toggleGroup('lists', state)" icon="format-list-bulleted-square"
       :label="$t('globals.terms.lists')">
