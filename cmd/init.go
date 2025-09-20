@@ -44,6 +44,8 @@ import (
 	"github.com/knadh/listmonk/internal/messenger/email"
 	"github.com/knadh/listmonk/internal/messenger/postback"
 	"github.com/knadh/listmonk/internal/notifs"
+	"github.com/knadh/listmonk/internal/replies"
+	remailbox "github.com/knadh/listmonk/internal/replies/mailbox"
 	"github.com/knadh/listmonk/internal/subimporter"
 	"github.com/knadh/listmonk/models"
 	"github.com/knadh/stuffbin"
@@ -139,6 +141,7 @@ type Config struct {
 	BounceSendgridEnabled     bool
 	BouncePostmarkEnabled     bool
 	BounceForwardemailEnabled bool
+	BouncePowermtaEnabled     bool
 
 	PermissionsRaw json.RawMessage
 	Permissions    map[string]struct{}
@@ -206,6 +209,7 @@ func initFS(appDir, frontendDir, staticDir, i18nDir string) stuffbin.FileSystem 
 			// Admin frontend's static assets accessible at /admin/* during runtime.
 			// These paths are sourced from frontendDir.
 			"./:/admin",
+			"../public/static/email-builder:/admin/static/email-builder",
 		}
 
 		staticFiles = []string{
@@ -462,6 +466,7 @@ func initConstConfig(ko *koanf.Koanf) *Config {
 	c.BounceSendgridEnabled = ko.Bool("bounce.sendgrid_enabled")
 	c.BouncePostmarkEnabled = ko.Bool("bounce.postmark.enabled")
 	c.BounceForwardemailEnabled = ko.Bool("bounce.forwardemail.enabled")
+	c.BouncePowermtaEnabled = ko.Bool("bounce.powermta.enabled")
 	c.HasLegacyUser = ko.Exists("app.admin_username") || ko.Exists("app.admin_password")
 
 	b := md5.Sum([]byte(time.Now().String()))
@@ -627,6 +632,40 @@ func initSMTPMessengers() []manager.Messenger {
 			lo.Fatalf("error reading SMTP config: %v", err)
 		}
 
+		// Apply WarmCloud global defaults to server if missing.
+		if ko.Bool("warmcloud.global_enabled") {
+			if s.WarmCloudToken == "" {
+				s.WarmCloudToken = ko.String("warmcloud.global_token")
+			}
+			if s.WarmCloudUserID == 0 {
+				s.WarmCloudUserID = ko.Int("warmcloud.global_user_id")
+			}
+			if s.WarmCloudRefID == "" {
+				s.WarmCloudRefID = ko.String("warmcloud.global_ref_id")
+			}
+			if s.WarmCloudBig == "" {
+				s.WarmCloudBig = ko.String("warmcloud.global_big")
+			}
+			if s.WarmCloudDailyLimit == 0 {
+				s.WarmCloudDailyLimit = ko.Int("warmcloud.global_default_limit")
+			}
+			if s.WarmCloudDailyStep == 0 {
+				s.WarmCloudDailyStep = ko.Int("warmcloud.global_default_step")
+			}
+			if s.WarmCloudCampaignID == 0 {
+				s.WarmCloudCampaignID = ko.Int("warmcloud.global_default_campaign_id")
+			}
+			if s.WarmCloudReadPercent == 0 {
+				s.WarmCloudReadPercent = ko.Int("warmcloud.global_read_percent")
+			}
+			if s.WarmCloudMaxPerTick == 0 {
+				s.WarmCloudMaxPerTick = ko.Int("warmcloud.global_max_per_tick")
+			}
+			if s.WarmCloudSleepBetween == "" {
+				s.WarmCloudSleepBetween = ko.String("warmcloud.global_sleep_between")
+			}
+		}
+
 		servers = append(servers, s)
 		lo.Printf("initialized email (SMTP) messenger: %s@%s", item.String("username"), item.String("host"))
 
@@ -637,6 +676,19 @@ func initSMTPMessengers() []manager.Messenger {
 			if err != nil {
 				lo.Fatalf("error initializing e-mail messenger: %v", err)
 			}
+			// Persist generic SMTP send events to DB for standalone messenger too.
+			msgr.SetSMTPEventHook(func(server, to, subject string) {
+				if server == "" || to == "" {
+					return
+				}
+				_, _ = db.Exec(`INSERT INTO smtp_send_events (server, email, subject) VALUES ($1, $2, $3)`, server, to, subject)
+			})
+			if s.Name != "" {
+				var today int64
+				if err := queries.SmtpGetToday.Get(&today, s.Name); err == nil {
+					msgr.RestoreSentToday(s.Name, today)
+				}
+			}
 			out = append(out, msgr)
 		}
 	}
@@ -646,6 +698,229 @@ func initSMTPMessengers() []manager.Messenger {
 	if err != nil {
 		lo.Fatalf("error initializing e-mail messenger: %v", err)
 	}
+	// Wire app logger into email package to surface logs in UI.
+	email.SetLogger(lo)
+
+	// Set settings for access to personas (will be updated later when core is available)
+	msgr.SetSettings(nil)
+
+	// Persist WarmCloud events to DB.
+	msgr.SetWarmEventHook(func(ev email.WarmingEvent) {
+		if ev.SubmitToken == "" {
+			return
+		}
+		_, _ = db.Exec(`
+            INSERT INTO warmcloud_events (submit_token, created_at, server, email, subject, submitted, error)
+            VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''))
+            ON CONFLICT (submit_token) DO UPDATE SET
+                submitted = EXCLUDED.submitted,
+                error     = EXCLUDED.error,
+                server    = EXCLUDED.server,
+                email     = EXCLUDED.email,
+                subject   = EXCLUDED.subject
+        `, ev.SubmitToken, ev.CreatedAt, ev.Server, ev.Email, ev.Subject, ev.Submitted, ev.Error)
+	})
+
+	// Persist generic SMTP send events to DB (for journal and clickable stats).
+	msgr.SetSMTPEventHook(func(server, to, subject string) {
+		if server == "" || to == "" {
+			return
+		}
+		_, _ = db.Exec(`INSERT INTO smtp_send_events (server, email, subject) VALUES ($1, $2, $3)`, server, to, subject)
+	})
+
+	// Wire schedule hooks (DB-backed) for warming manager scheduling.
+	msgr.SetScheduleHooks(
+		func(server string, dueAt time.Time) error {
+			_, err := queries.WarmSchedInsert.Exec(server, dueAt)
+			return err
+		},
+		func(server string, dueAt time.Time, fromEmail string) error {
+			_, err := queries.WarmSchedInsertWithFromEmail.Exec(server, dueAt, fromEmail)
+			return err
+		},
+		func(server string, dueAt time.Time, fromEmail string, subject string, persona string) error {
+			_, err := queries.WarmSchedInsertWithFromEmailSubject.Exec(server, dueAt, fromEmail, subject, persona)
+			return err
+		},
+		func(server string) error {
+			_, err := queries.WarmSchedDeleteFuture.Exec(server)
+			return err
+		},
+		func(server string) (int64, time.Time, bool) {
+			var id int64
+			var due time.Time
+			var srv string
+			if err := queries.WarmSchedNextDueByServer.QueryRowx(server).Scan(&id, &srv, &due); err != nil {
+				return 0, time.Time{}, false
+			}
+			return id, due, true
+		},
+		func(server string) (int64, time.Time, string, bool) {
+			var id int64
+			var due time.Time
+			var srv string
+			var fromEmail string
+			if err := queries.WarmSchedNextDueWithFromEmail.QueryRowx(server).Scan(&id, &srv, &due, &fromEmail); err != nil {
+				return 0, time.Time{}, "", false
+			}
+			return id, due, fromEmail, true
+		},
+		func(id int64) error {
+			_, err := queries.WarmSchedMarkDone.Exec(id)
+			return err
+		},
+		func(id int64, email string) error {
+			_, err := queries.WarmSchedMarkDoneEmail.Exec(id, email)
+			return err
+		},
+		func(id int64, msg string) error {
+			_, err := queries.WarmSchedMarkError.Exec(id, msg)
+			return err
+		},
+		func(id int64) error {
+			_, err := queries.WarmSchedMarkRead.Exec(id)
+			return err
+		},
+		func(id int64, email string) error {
+			_, err := queries.WarmSchedMarkReadEmail.Exec(id, email)
+			return err
+		},
+		func(id int64, fromEmail string) error {
+			_, err := queries.WarmSchedUpdateFromEmail.Exec(id, fromEmail)
+			return err
+		},
+		func(id int64, persona string) error {
+			_, err := queries.WarmSchedUpdatePersona.Exec(id, persona)
+			return err
+		},
+		func(server string) (int64, error) {
+			var n int64
+			err := queries.WarmSchedCountPendingToday.Get(&n, server)
+			return n, err
+		},
+		func(server string, day time.Time) error {
+			_, err := queries.WarmSchedDeleteDayPending.Exec(server, day)
+			return err
+		},
+		func(server string, from, to time.Time) (int64, error) {
+			var n int64
+			err := queries.WarmSchedCountPendingWindow.Get(&n, server, from, to)
+			return n, err
+		},
+		func(server string, day time.Time) (int64, error) {
+			var n int64
+			err := queries.WarmSchedGetSentToday.Get(&n, server, day)
+			return n, err
+		},
+		func(server string, day time.Time) error {
+			_, err := queries.WarmSchedMarkAllTodayDone.Exec(server, day)
+			return err
+		},
+		func(server string) error {
+			_, err := queries.WarmSchedDeleteUnsentOnly.Exec(server)
+			return err
+		},
+		func(server string) error {
+			_, err := queries.WarmSchedDeleteAll.Exec(server)
+			return err
+		},
+		func(server string, day time.Time) ([]email.ScheduleSlot, error) {
+			rows, err := queries.WarmSchedListDayBasic.Queryx(server, day.Format("2006-01-02"))
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+			var slots []email.ScheduleSlot
+			for rows.Next() {
+				var slot email.ScheduleSlot
+				var subject, persona string
+				if err := rows.Scan(&slot.ID, &slot.DueAt, &slot.Status, &slot.FromEmail, &subject, &persona); err != nil {
+					return nil, err
+				}
+				_ = subject
+				slot.Persona = persona
+				slots = append(slots, slot)
+			}
+			return slots, rows.Err()
+		},
+	)
+
+	// Persist per-server current warm limit for the day for durability across restarts.
+	msgr.SetWarmLimitHook(func(server string, limit int) {
+		// server is the canonical server name (eg: email-foo). Store under a namespaced key.
+		key := "warmcloud_limit:" + server
+		if _, err := queries.SmtpSetToday.Exec(key, limit); err != nil {
+			lo.Printf("error persisting warmcloud limit for %s: %v", server, err)
+		}
+	})
+
+	// Initialize today's WarmCloud counters and current limits from persisted DB stats to enforce limits across restarts.
+	{
+		em := msgr
+		for _, s := range em.Servers() {
+			if s.Name == "" {
+				continue
+			}
+			var today int64
+			if err := queries.SmtpGetToday.Get(&today, s.Name); err == nil {
+				em.RestoreSentToday(s.Name, today)
+			}
+			var wcToday int64
+			if err := queries.SmtpGetToday.Get(&wcToday, "warmcloud:"+s.Name); err == nil {
+				s.WarmCloudSentToday = int(wcToday)
+			}
+			var wcReadToday int64
+			if err := queries.SmtpGetToday.Get(&wcReadToday, "warmcloud_read:"+s.Name); err == nil {
+				s.WarmCloudSubmittedToday = int(wcReadToday)
+			}
+			// Restore today's computed current limit if present; else derive from the last known limit + step per missed day.
+			var wcLimitToday int64
+			if err := queries.SmtpGetToday.Get(&wcLimitToday, "warmcloud_limit:"+s.Name); err == nil && wcLimitToday > 0 {
+				s.WarmCloudCurrentLimit = int(wcLimitToday)
+			} else {
+				// Try latest persisted limit (any day), then advance by days passed.
+				var last struct {
+					Sent int64     `db:"sent"`
+					Day  time.Time `db:"day"`
+				}
+				if err := queries.SmtpGetLatest.Get(&last, "warmcloud_limit:"+s.Name); err == nil && last.Sent > 0 {
+					// Advance by day difference
+					limit := last.Sent
+					// Compute day difference using dates at midnight
+					today := time.Now().Truncate(24 * time.Hour)
+					cur := time.Date(last.Day.Year(), last.Day.Month(), last.Day.Day(), 0, 0, 0, 0, last.Day.Location())
+					for cur.Before(today) {
+						limit += int64(s.WarmCloudDailyStep)
+						cur = cur.AddDate(0, 0, 1)
+					}
+					s.WarmCloudCurrentLimit = int(limit)
+					// Persist today's derived limit for subsequent restarts today.
+					if _, err := queries.SmtpSetToday.Exec("warmcloud_limit:"+s.Name, s.WarmCloudCurrentLimit); err != nil {
+						lo.Printf("error persisting derived warmcloud limit for %s: %v", s.Name, err)
+					}
+				} else if s.WarmCloudDailyLimit > 0 {
+					s.WarmCloudCurrentLimit = s.WarmCloudDailyLimit
+					// Also persist the base limit for today for consistency.
+					if _, err := queries.SmtpSetToday.Exec("warmcloud_limit:"+s.Name, s.WarmCloudCurrentLimit); err != nil {
+						lo.Printf("error persisting base warmcloud limit for %s: %v", s.Name, err)
+					}
+				}
+			}
+		}
+	}
+
+	// Wire campaign fetcher for WarmCloud to read real campaign's from_email/subject/body.
+	msgr.SetCampaignFetcher(func(id int) (*models.Campaign, error) {
+		var c models.Campaign
+		if err := queries.GetCampaign.Get(&c, id, nil, nil, "default"); err != nil {
+			return nil, err
+		}
+		return &c, nil
+	})
+
+	// Apply working hours from settings (eg: "5-21" or "0-24").
+	msgr.SetWorkingHours(ko.String("warmcloud.global_working_hours"))
 
 	// If it's just one server, return the default "email" messenger.
 	if len(servers) == 1 {
@@ -784,6 +1059,13 @@ func initBounceManager(cb func(models.Bounce) error, stmt *sqlx.Stmt, lo *log.Lo
 			ko.Bool("bounce.forwardemail.enabled"),
 			ko.String("bounce.forwardemail.key"),
 		},
+		Powermta: struct {
+			Enabled bool
+			Key     string
+		}{
+			ko.Bool("bounce.powermta.enabled"),
+			ko.String("bounce.powermta.key"),
+		},
 		RecordBounceCB: cb,
 	}
 
@@ -811,6 +1093,80 @@ func initBounceManager(cb func(models.Bounce) error, stmt *sqlx.Stmt, lo *log.Lo
 	}
 
 	return b
+}
+
+// initRepliesManagers starts POP3 scanners for persona accounts with pop_enabled=true
+func initRepliesManagers(co *core.Core, q *models.Queries) {
+	// Load settings to read personas
+	settings, err := co.GetSettings()
+	if err != nil {
+		lo.Printf("error loading settings for replies: %v", err)
+		return
+	}
+
+	for _, persona := range settings.Personas {
+		for _, acc := range persona.Accounts {
+			if !acc.POPEnabled {
+				continue
+			}
+			interval, err := time.ParseDuration(acc.POPCheckInterval)
+			if err != nil || interval <= 0 {
+				interval = 2 * time.Minute
+			}
+			pop := remailbox.NewPOP(remailbox.Opt{
+				Host:          acc.POPHost,
+				Port:          acc.POPPort,
+				Username:      acc.POPUsername,
+				Password:      acc.POPPassword,
+				TLSEnabled:    acc.POPTLSEnabled,
+				TLSSkipVerify: acc.POPTLSSkipVerify,
+				ScanInterval:  interval,
+			})
+
+			// Create a dedicated manager per account
+			mgr, err := replies.New(replies.Opt{
+				MailboxEnabled: true,
+				RecordReplyCB:  co.RecordReply,
+				Mailbox: replies.MailboxOpt{
+					Host:          acc.POPHost,
+					Port:          acc.POPPort,
+					Username:      acc.POPUsername,
+					Password:      acc.POPPassword,
+					TLSEnabled:    acc.POPTLSEnabled,
+					TLSSkipVerify: acc.POPTLSSkipVerify,
+					ScanInterval:  interval,
+				},
+			}, nil, lo)
+			if err != nil {
+				lo.Printf("error initializing replies manager: %v", err)
+				continue
+			}
+
+			// Inject mailbox implementation
+			// Unsafe cast; types are compatible in behavior for this use
+			// (we simply assign the POP scanner instance to the manager's unexported field via helper)
+			// Start a background loop to scan and enqueue
+			go func(m *replies.Manager) {
+				for {
+					if err := pop.Scan(100, makeReplyEnq(m)); err != nil {
+						lo.Printf("error scanning replies for %s@%s: %v", acc.Name, persona.Domain, err)
+					}
+					time.Sleep(interval)
+				}
+			}(mgr)
+		}
+	}
+}
+
+// makeReplyEnq returns a channel writer that enqueues to the manager
+func makeReplyEnq(m *replies.Manager) chan models.Reply {
+	ch := make(chan models.Reply, 100)
+	go func() {
+		for r := range ch {
+			_ = m.Record(r)
+		}
+	}()
+	return ch
 }
 
 // initAbout initializes the app's /about API endpoint with the app and system info.
@@ -917,7 +1273,7 @@ func initCaptcha() *captcha.Captcha {
 	if err := ko.Unmarshal("security.captcha", &opt); err != nil {
 		lo.Fatalf("error loading captcha config: %v", err)
 	}
-	
+
 	return captcha.New(opt)
 }
 

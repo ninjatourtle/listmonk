@@ -33,7 +33,7 @@ http.interceptors.response.use((resp) => {
   }
 
   let data = {};
-  if (typeof resp.data.data === 'object') {
+  if (typeof resp.data.data === 'object' && resp.data.data !== null) {
     if (resp.data.data.constructor === Object) {
       data = { ...resp.data.data };
     } else {
@@ -256,6 +256,24 @@ export const deleteSubscribersByQuery = (data) => http.post(
 // Subscriber import.
 export const importSubscribers = (data) => http.post('/api/import/subscribers', data);
 
+export const validateSubscriberEmail = (email) => http.post(
+  '/api/subscribers/validate',
+  { email },
+  { loading: models.subscribers, disableToast: true },
+);
+
+export const validateSubscribersBulk = (ids) => http.post(
+  '/api/subscribers/validate/bulk',
+  { ids },
+  { loading: models.subscribers },
+);
+
+export const validateSubscribersByQuery = (data) => http.post(
+  '/api/subscribers/validate/query',
+  data,
+  { loading: models.subscribers },
+);
+
 export const getImportStatus = () => http.get('/api/import/subscribers');
 
 export const getImportLogs = async () => http.get(
@@ -307,9 +325,31 @@ export const getCampaignBounceCounts = async (params) => http.get(
   { params, loading: models.campaigns },
 );
 
+export const getCampaignDeliveries = async (id, params) => http.get(
+  `/api/campaigns/${id}/deliveries`,
+  { params, loading: models.campaigns },
+);
+
 export const getCampaignLinkCounts = async (params) => http.get(
   '/api/campaigns/analytics/links',
   { params, loading: models.campaigns },
+);
+
+// Recent sends
+export const getRecentSends = async (params) => http.get(
+  '/api/sends',
+  { params, loading: models.campaigns, camelCase: true },
+);
+
+// WarmCloud recent sends (warming events)
+export const getWarmCloudSends = async (params) => http.get(
+  '/api/warmcloud/sends',
+  { params, loading: models.campaigns, camelCase: true },
+);
+
+export const getSmtpSends = async (params) => http.get(
+  '/api/smtp/sends',
+  { params, loading: models.campaigns, camelCase: true },
 );
 
 export const convertCampaignContent = async (data) => http.post(
@@ -430,6 +470,123 @@ export const getSMTPStats = async () => http.get(
 export const updateSMTPServer = async (name, data) => http.put(
   `/api/settings/smtp/${name}`,
   data,
+  { loading: models.settings },
+);
+
+export const checkSMTPServer = async (name) => http.get(
+  `/api/settings/smtp/${name}/check`,
+  { loading: models.settings },
+);
+
+export const updateWarmCloudSettings = async (data) => http.put(
+  '/api/settings/warmcloud',
+  data,
+  { loading: models.settings },
+);
+
+// WarmCloud control/status
+export const getWarmCloudStatus = async () => http.get(
+  '/api/settings/warmcloud/status',
+  { loading: models.settings },
+);
+
+export const getWarmCloudBalance = async () => http.get(
+  '/api/settings/warmcloud/balance',
+  { loading: models.settings, disableToast: true },
+);
+
+export const pauseWarmCloud = async (name) => http.post(
+  `/api/settings/smtp/${name}/warmcloud/pause`,
+  {},
+  { loading: models.settings },
+);
+
+export const resumeWarmCloud = async (name) => http.post(
+  `/api/settings/smtp/${name}/warmcloud/resume`,
+  {},
+  { loading: models.settings },
+);
+
+export const forceWarmCloud = async (name) => http.post(
+  `/api/settings/smtp/${name}/warmcloud/force`,
+  {},
+  { loading: models.settings },
+);
+
+export const resetWarmCloudDaily = async (name) => http.post(
+  `/api/settings/smtp/${name}/warmcloud/reset-daily`,
+  {},
+  { loading: models.settings },
+);
+
+export const rebuildWarmCloud = async (name) => http.post(
+  `/api/settings/smtp/${name}/warmcloud/rebuild`,
+  {},
+  { loading: models.settings },
+);
+
+export const clearWarmCloudSchedule = async (name) => http.post(
+  `/api/warmcloud/clear-schedule?server=${name}`,
+  {},
+  { loading: models.settings },
+);
+
+export const finishWarmCloudToday = async (name) => http.post(
+  `/api/warmcloud/finish-today?server=${name}`,
+  {},
+  { loading: models.settings },
+);
+
+export const getWarmCloudSchedule = async (params) => http.get(
+  '/api/warmcloud/schedule',
+  { params },
+);
+
+export const rescheduleWarmCloudSlot = async (id, dueAt) => http.post(
+  `/api/warmcloud/schedule/${id}/reschedule`,
+  { due_at: dueAt },
+  { loading: models.settings },
+);
+
+export const deleteWarmCloudSlot = async (id) => http.post(
+  `/api/warmcloud/schedule/${id}/delete`,
+  {},
+  { loading: models.settings },
+);
+
+export const skipWarmCloudSlot = async (id) => http.post(
+  `/api/warmcloud/schedule/${id}/skip`,
+  {},
+  { loading: models.settings },
+);
+
+// Campaign schedule
+export const getCampaignSchedule = async (params) => http.get(
+  '/api/campaigns/schedule',
+  { params },
+);
+
+export const rescheduleCampaignSlot = async (id, dueAt) => http.post(
+  `/api/campaigns/schedule/${id}/reschedule`,
+  { due_at: dueAt },
+  { loading: models.settings },
+);
+
+export const deleteCampaignSlot = async (id) => http.post(
+  `/api/campaigns/schedule/${id}/delete`,
+  {},
+  { loading: models.settings },
+);
+
+export const skipCampaignSlot = async (id) => http.post(
+  `/api/campaigns/schedule/${id}/skip`,
+  {},
+  { loading: models.settings },
+);
+
+export const resetWarmCloudDailyAll = async () => http.post(
+  '/api/settings/warmcloud/reset-daily-all',
+  {},
   { loading: models.settings },
 );
 

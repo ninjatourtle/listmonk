@@ -219,6 +219,19 @@ func main() {
 		}
 	}
 
+	// Attach SMTP sent-stat persistence hook to all email messengers.
+	for _, m := range msgrs {
+		if em, ok := m.(*email.Emailer); ok {
+			em.SetOnSentHook(func(name string) {
+				go func(n string) {
+					if _, err := queries.SmtpIncrement.Exec(n); err != nil {
+						lo.Printf("error recording smtp stat for %s: %v", n, err)
+					}
+				}(name)
+			})
+		}
+	}
+
 	// Initialize the global admin/sub e-mail notifier.
 	initNotifs(fs, i18n, emailMsgr, urlCfg, ko)
 
@@ -229,6 +242,11 @@ func main() {
 	// POP3 mailbox scanning.
 	if ko.Bool("bounce.enabled") {
 		go bounce.Run()
+	}
+
+	// Initialize replies POP3 scanners per persona account (if enabled)
+	if ko.Bool("reply.enabled") {
+		go initRepliesManagers(core, queries)
 	}
 
 	// Start cronjobs.
@@ -277,6 +295,13 @@ func main() {
 
 		// If there are no users, then the app needs to prompt for new user setup.
 		needsUserSetup: !hasUsers,
+	}
+
+	// Set settings in email messenger for persona access
+	if emailMsgr != nil {
+		if settings, err := core.GetSettings(); err == nil {
+			emailMsgr.SetSettings(&settings)
+		}
 	}
 
 	// Star the update checker.

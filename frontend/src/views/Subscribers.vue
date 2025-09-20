@@ -19,6 +19,17 @@
             {{ $t('globals.buttons.new') }}
           </b-button>
         </b-field>
+        <b-field expanded>
+          <b-button expanded type="is-info" icon-left="check" @click="validateAllServer" class="btn-validate">
+            {{ $t('subscribers.validate') || 'Валидировать' }}
+          </b-button>
+        </b-field>
+        <b-field>
+          <a class="button is-light" :href="'/admin/validation-logs'" target="_blank" rel="noopener noreferrer">
+            <b-icon icon="format-list-bulleted-square" size="is-small" />
+            &nbsp;Логи валидации
+          </a>
+        </b-field>
       </div>
     </header>
 
@@ -82,6 +93,9 @@
             {{ $t('subscribers.export') }}
           </a>
           <template v-if="bulk.checked.length > 0">
+            <a class="a" href="#" @click.prevent="validateSelected" data-cy="btn-validate-selected">
+              <b-icon icon="check" size="is-small" /> {{ $t('subscribers.validateAndBlocklist') || 'Валидировать и в черный список' }}
+            </a>
             <a class="a" href="#" @click.prevent="showBulkListForm" data-cy="btn-manage-lists">
               <b-icon icon="format-list-bulleted-square" size="is-small" /> Manage lists
             </a>
@@ -158,6 +172,11 @@
               <b-icon icon="cloud-download-outline" size="is-small" />
             </b-tooltip>
           </a>
+          <a href="#" @click.prevent="openHistory(props.row)" :aria-label="'История валидации'">
+            <b-tooltip label="История валидации" type="is-dark">
+              <b-icon icon="history" size="is-small" />
+            </b-tooltip>
+          </a>
           <a v-if="$can('subscribers:manage')" :href="`/subscribers/${props.row.id}`"
             @click.prevent="showEditForm(props.row)" data-cy="btn-edit" :aria-label="$t('globals.buttons.edit')">
             <b-tooltip :label="$t('globals.buttons.edit')" type="is-dark">
@@ -186,6 +205,70 @@
     <!-- Add / edit form modal -->
     <b-modal scroll="keep" :aria-modal="true" :active.sync="isFormVisible" :width="850" @close="onFormClose">
       <subscriber-form :data="curItem" :is-editing="isEditing" @finished="querySubscribers" />
+    </b-modal>
+
+    <!-- Validate email modal (inside root section) -->
+    <b-modal :active.sync="showValidate" :width="700">
+      <div class="box">
+        <h4 class="title is-4">{{ $t('subscribers.validate') || 'Валидировать' }}</h4>
+        <b-field :label="$t('subscribers.email')">
+          <b-input v-model="validateEmailStr" placeholder="user@example.com" />
+        </b-field>
+        <div class="buttons">
+          <b-button type="is-primary" :loading="validating" @click="runValidate">{{ $t('globals.buttons.run') || 'Проверить' }}</b-button>
+          <b-button @click="showValidate = false">{{ $t('globals.buttons.close') || 'Закрыть' }}</b-button>
+        </div>
+        <div v-if="validateResult">
+          <h5 class="title is-5">Результат</h5>
+          <ul>
+            <li><strong>Пользователь:</strong> {{ validateResult.user }}</li>
+            <li><strong>Домен:</strong> {{ validateResult.domain }}</li>
+            <li><strong>Синтаксис:</strong> {{ validateResult.syntaxOk ? 'Успешно' : 'Ошибка' }}</li>
+            <li>
+              <strong>MX-записи:</strong>
+              {{ validateResult.mxOk ? 'Успешно' : 'Ошибка' }}
+              <span v-if="validateResult.mxHosts && validateResult.mxHosts.length">
+                ({{ validateResult.mxHosts.join(', ') }})
+              </span>
+            </li>
+            <li><strong>Доставка:</strong> {{ validateResult.deliveryOk ? 'Успешно' : 'Ошибка' }}</li>
+            <li><strong>Бесплатная:</strong> {{ validateResult.free ? 'Да' : 'Нет' }}</li>
+            <li><strong>Временный:</strong> {{ validateResult.temporary ? 'Да' : 'Нет' }}</li>
+          </ul>
+          <h5 class="title is-5 mt-3">Диалог</h5>
+          <pre style="max-height: 240px; overflow:auto;">{{ renderDialog(validateResult.dialog) }}</pre>
+        </div>
+      </div>
+    </b-modal>
+
+    <!-- Bulk validation progress -->
+    <b-modal :active.sync="showBulkValidate" :width="800">
+      <div class="box">
+        <h4 class="title is-4">Валидация подписчиков</h4>
+        <b-progress :value="bulkDone" :max="bulkTotal" type="is-info" show-value>
+          {{ Math.round(100 * bulkDone / (bulkTotal || 1)) }}%
+        </b-progress>
+        <p class="mt-2">Всего: {{ bulkTotal }}, Готово: {{ bulkDone }}, В чёрный список: {{ bulkInvalid }}</p>
+        <pre style="max-height: 300px; overflow:auto; background:#0b0b0b; color:#ddd; padding:8px;">
+{{ bulkLogs.join('\n') }}
+        </pre>
+        <div class="buttons">
+          <b-button v-if="!bulkRunning" type="is-primary" @click="showBulkValidate = false">Закрыть</b-button>
+          <b-button v-if="bulkRunning" disabled>Идёт валидация…</b-button>
+        </div>
+      </div>
+    </b-modal>
+
+    <!-- Per-subscriber history -->
+    <b-modal :active.sync="showHistory" :width="700">
+      <div class="box">
+        <h4 class="title is-4">История валидации — {{ historySub && historySub.email }}</h4>
+        <pre style="max-height: 400px; overflow:auto;">{{ renderHistory(historyItems) }}</pre>
+        <div class="buttons">
+          <b-button @click="clearHistory(historySub.id)" type="is-danger">Очистить</b-button>
+          <b-button @click="showHistory = false">Закрыть</b-button>
+        </div>
+      </div>
     </b-modal>
   </section>
 </template>
@@ -237,6 +320,23 @@ export default Vue.extend({
         order: 'desc',
         subStatus: null,
       },
+      showValidate: false,
+      validateEmailStr: '',
+      validating: false,
+      validateResult: null,
+
+      // Bulk validation progress
+      showBulkValidate: false,
+      bulkRunning: false,
+      bulkTotal: 0,
+      bulkDone: 0,
+      bulkInvalid: 0,
+      bulkLogs: [],
+
+      // History modal
+      showHistory: false,
+      historyItems: [],
+      historySub: null,
     };
   },
 
@@ -244,6 +344,81 @@ export default Vue.extend({
     // Count the lists from which a subscriber has not unsubscribed.
     listCount(lists) {
       return lists.reduce((defVal, item) => (defVal + (item.subscriptionStatus !== 'unsubscribed' ? 1 : 0)), 0);
+    },
+    openValidate() {
+      this.validateEmailStr = '';
+      this.validateResult = null;
+      this.showValidate = true;
+    },
+    async validateAllServer() {
+      // Запуск серверной валидации для всех подписчиков (всей базы)
+      this.$utils.confirm('Проверить ВСЕХ подписчиков и смотреть прогресс в логах?', async () => {
+        window.open('/admin/validation-logs', '_blank');
+        try {
+          await this.$api.validateSubscribersByQuery({ all: true });
+          this.$utils.toast('Запущено. Прогресс в логах.', 'is-success');
+        } catch (e) {
+          this.$utils.toast(this.$t('globals.messages.internalError'), 'is-danger');
+        }
+      });
+    },
+    startBulkValidation(rows) {
+      // Start bulk UI
+      this.showBulkValidate = true;
+      this.bulkRunning = true;
+      this.bulkTotal = rows.length;
+      this.bulkDone = 0;
+      this.bulkInvalid = 0;
+      this.bulkLogs = [];
+      const work = rows.slice();
+      const next = () => {
+        if (work.length === 0) {
+          // finished
+          this.bulkRunning = false;
+          this.querySubscribers();
+          return;
+        }
+        const row = work.shift();
+        const { email } = row;
+        this.$api.validateSubscriberEmail(email).then((resp) => {
+          const ok = resp.syntaxOk && resp.mxOk && resp.deliveryOk;
+          const line = `${ok ? 'OK' : 'FAIL'} | ${email} | syntax:${resp.syntaxOk ? 'ok' : 'err'} mx:${resp.mxOk ? 'ok' : 'err'} delivery:${resp.deliveryOk ? 'ok' : 'err'}`;
+          this.bulkLogs.push(line);
+          if (this.bulkLogs.length > 500) {
+            this.bulkLogs = this.bulkLogs.slice(-500);
+          }
+          this.saveHistory(row.id, email, resp, ok);
+          if (!ok) {
+            this.$api.blocklistSubscribers({ ids: [row.id] }).then(() => {
+              this.bulkInvalid += 1;
+            }).catch(() => { this.bulkInvalid += 1; });
+          }
+        }).catch((e) => {
+          this.bulkLogs.push(`ERR | ${email} | ${e}`);
+          if (this.bulkLogs.length > 500) {
+            this.bulkLogs = this.bulkLogs.slice(-500);
+          }
+          this.$api.blocklistSubscribers({ ids: [row.id] }).then(() => {
+            this.bulkInvalid += 1;
+          }).catch(() => { this.bulkInvalid += 1; });
+        }).finally(() => {
+          this.bulkDone += 1;
+          setTimeout(next, 100);
+        });
+      };
+      next();
+    },
+    renderDialog(d) {
+      if (!d || !Array.isArray(d)) return '';
+      return d.map((l) => (l.dir ? `${l.dir}> ${l.msg}` : `${l.Dir || ''}> ${l.Msg || ''}`)).join('\n');
+    },
+    runValidate() {
+      const email = (this.validateEmailStr || '').trim();
+      if (!email) return;
+      this.validating = true;
+      this.$api.validateSubscriberEmail(email).then((resp) => {
+        this.validateResult = resp;
+      }).catch(() => {}).finally(() => { this.validating = false; });
     },
 
     toggleAdvancedSearch() {
@@ -470,6 +645,55 @@ export default Vue.extend({
       }
 
       this.$utils.confirm(this.$t('subscribers.confirmDelete', { num: this.numSelectedSubscribers }), fn);
+    },
+
+    // Проверить выбранные (сервером) и смотреть прогресс в логах
+    validateSelected() {
+      const rows = (this.bulk && this.bulk.checked) ? this.bulk.checked.slice() : [];
+      if (!rows.length) { this.$utils.toast('Не выбрано ни одного подписчика', 'is-danger'); return; }
+      const ids = rows.map((r) => r.id);
+      this.$utils.confirm('Проверить выбранные адреса и смотреть прогресс в логах?', async () => {
+        window.open('/admin/validation-logs', '_blank');
+        try {
+          await this.$api.validateSubscribersBulk(ids);
+          this.$utils.toast('Запущено. Прогресс в логах.', 'is-success');
+        } catch (e) {
+          this.$utils.toast(this.$t('globals.messages.internalError'), 'is-danger');
+        }
+      });
+    },
+    // History helpers
+    historyKey(id) { return `validation_history_${id}`; },
+    saveHistory(id, email, result, ok) {
+      const key = this.historyKey(id);
+      let arr = [];
+      try { arr = JSON.parse(localStorage.getItem(key) || '[]'); } catch (e) { arr = []; }
+      arr.push({
+        ts: Date.now(),
+        email,
+        ok,
+        result,
+      });
+      try { localStorage.setItem(key, JSON.stringify(arr.slice(-50))); } catch (e) { /* ignore */ }
+    },
+    openHistory(row) {
+      this.historySub = row;
+      const key = this.historyKey(row.id);
+      try { this.historyItems = JSON.parse(localStorage.getItem(key) || '[]'); } catch (e) { this.historyItems = []; }
+      this.showHistory = true;
+    },
+    clearHistory(id) {
+      try { localStorage.removeItem(this.historyKey(id)); } catch (e) { /* ignore */ }
+      this.historyItems = [];
+    },
+    renderHistory(items) {
+      if (!items || !items.length) return 'Нет записей';
+      return items.map((it) => {
+        const d = new Date(it.ts).toLocaleString();
+        const st = it.ok ? 'OK' : 'FAIL';
+        const r = it.result || {};
+        return `${d} | ${st} | ${it.email} | syntax:${r.syntaxOk ? 'ok' : 'err'} mx:${r.mxOk ? 'ok' : 'err'} delivery:${r.deliveryOk ? 'ok' : 'err'}`;
+      }).join('\n');
     },
 
     bulkChangeLists(action, preconfirm, lists) {

@@ -5,7 +5,7 @@
 </template>
 
 <script>
-import Chart from 'chart.js/auto';
+import ChartJS from 'chart.js/auto';
 
 const DEFAULT_DONUT = {
   type: 'doughnut',
@@ -136,29 +136,79 @@ export default {
     data: { type: Object, default: () => { } },
     type: { type: String, default: 'line' },
     onClick: { type: Function, default: () => { } },
+    options: { type: Object, default: () => ({}) },
+  },
+
+  data() {
+    return {
+      chart: null,
+    };
   },
 
   mounted() {
-    const ctx = this.$el.querySelector('.chart-canvas');
+    this.initChart();
+  },
 
-    let def = {};
-    switch (this.$props.type) {
-      case 'donut':
-        def = DEFAULT_DONUT;
-        break;
-      case 'bar':
-        def = DEFAULT_BAR;
-        break;
-      default:
-        def = DEFAULT_LINE;
-        break;
+  beforeDestroy() {
+    if (this.chart) {
+      this.chart.destroy();
+      this.chart = null;
     }
+  },
 
-    const conf = { ...def, data: this.$props.data };
-    if (this.$props.onClick) {
-      conf.options.onClick = this.$props.onClick;
-    }
-    this.chart = new Chart(ctx, conf);
+  watch: {
+    data: {
+      deep: true,
+      handler() {
+        this.updateData();
+      },
+    },
+    type() {
+      this.initChart();
+    },
+    options: {
+      deep: true,
+      handler() {
+        this.initChart();
+      },
+    },
+  },
+
+  methods: {
+    baseConfig() {
+      switch (this.$props.type) {
+        case 'donut':
+          return DEFAULT_DONUT;
+        case 'bar':
+          return DEFAULT_BAR;
+        default:
+          return DEFAULT_LINE;
+      }
+    },
+
+    initChart() {
+      const ctx = this.$el.querySelector('.chart-canvas');
+      if (this.chart) {
+        this.chart.destroy();
+        this.chart = null;
+      }
+      const def = this.baseConfig();
+      const mergedOptions = { ...(def.options || {}), ...(this.$props.options || {}) };
+      const conf = { ...def, data: this.$props.data, options: mergedOptions };
+      if (this.$props.onClick) {
+        conf.options.onClick = this.$props.onClick;
+      }
+      this.chart = new ChartJS(ctx, conf);
+    },
+
+    updateData() {
+      if (!this.chart) {
+        this.initChart();
+        return;
+      }
+      this.chart.data = this.$props.data || {};
+      this.chart.update('none');
+    },
   },
 };
 </script>

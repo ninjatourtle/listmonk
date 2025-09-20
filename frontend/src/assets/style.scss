@@ -23,7 +23,7 @@ $body-family: "Inter", "Helvetica Neue", sans-serif;
 $body-size: 15px;
 $background: $white-bis;
 $body-background-color: $white-bis;
-$primary: #0055d4;
+$primary: #1EADFA;
 $green: #36995b;
 $turquoise: $green;
 $red: #FF5722;
@@ -47,6 +47,31 @@ $menu-item-active-color: $primary;
 
 /* Buefy */
 $modal-background-background-color: rgba(0, 0, 0, .30);
+
+/* Design tokens (CSS variables) */
+:root {
+  /* colors */
+  --color-primary: #{$primary};
+  --color-bg: #{$white-bis};
+  --color-surface: #{$white};
+  --color-border: #{$grey-lightest};
+  --color-text-muted: #{$grey};
+
+  /* radii */
+  --radius-base: 8px;
+  --radius-sm: 6px;
+
+  /* shadows */
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .08);
+  --shadow-2: 0 2px 8px rgba(16, 24, 40, .08);
+
+  /* spacing */
+  --space-1: 8px;
+  --space-2: 12px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --space-5: 32px;
+}
 
 .line-chart {
   min-height: 300px;
@@ -132,8 +157,9 @@ section {
 
 .box {
   background: $white;
-  box-shadow: 2px 2px 0 #f3f3f3;
+  box-shadow: var(--shadow-1);
   border: 1px solid #e6e6e6;
+  border-radius: var(--radius-base);
 }
   .box hr {
     background-color: #efefef;
@@ -210,16 +236,17 @@ section {
   }
 
   .main {
-    background: $white;
+    background: #f5f6fb;
     margin-left: 15px;
-    padding: 30px;
+    padding: 32px;
     flex-grow: 1;
     position: relative;
   }
 }
 
 .navbar {
-  box-shadow: 0 0 3px $grey-lighter;
+  box-shadow: var(--shadow-1);
+  background: var(--color-surface);
 }
 .navbar-brand {
   padding: 0 0 0 25px;
@@ -247,6 +274,15 @@ section {
     .router-link-exact-active {
       border-right: 5px solid $primary;
       outline: 0 none;
+      background: rgba($primary, .06);
+      color: $primary;
+      font-weight: 600;
+    }
+    a {
+      border-radius: var(--radius-sm);
+      &:hover {
+        background: $white-bis;
+      }
     }
     li ul {
       margin-right: 0;
@@ -256,9 +292,6 @@ section {
       a {
         padding-left: 25px;
       }
-    }
-    a {
-      border-radius: 0;
     }
   }
 }
@@ -472,10 +505,10 @@ body.is-noscroll {
 }
 .modal-content, .modal.dialog .modal-card {
   background: $white;
-  box-shadow: 0 0 10px #ddd;
+  box-shadow: var(--shadow-2);
   border: 1px solid #ddd;
   padding: 0;
-  border-radius: 5px;
+  border-radius: var(--radius-base);
 }
 .modal-card-head {
   display: block;
@@ -751,15 +784,25 @@ body.is-noscroll {
 section.dashboard {
   .title {
     margin-bottom: 0.5rem;
+    letter-spacing: 0.2px;
   }
 
   .tile.notification {
     @extend .box;
-    padding: 10px;
+    padding: 16px;
+  }
+
+  /* KPI bar */
+  .kpis .notification {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 90px;
   }
 
   .counts .column {
-    padding: 30px;
+    padding: 24px;
   }
 
   .level-item {
@@ -785,6 +828,12 @@ section.dashboard {
 
   .notification {
     border-width: 0;
+  }
+
+  /* Headings inside cards */
+  h3.title.is-size-6 {
+    font-weight: 600;
+    color: #111827;
   }
 }
 

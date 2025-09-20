@@ -20,10 +20,20 @@
       </header>
       <hr />
 
-      <section class="wrap" v-if="form">
-        <b-tabs type="is-boxed" :animated="false" v-model="tab">
+  <section class="wrap" v-if="form">
+    <b-tabs type="is-boxed" :animated="false" v-model="tab">
           <b-tab-item :label="$t('settings.general.name')" label-position="on-border">
             <general-settings :form="form" :key="key" />
+            <div class="box mt-4">
+              <h4 class="title is-6">Replies</h4>
+              <div class="columns is-multiline">
+                <div class="column is-3">
+                  <b-field label="Enable replies tracking">
+                    <b-switch v-model="form['reply.enabled']" />
+                  </b-field>
+                </div>
+              </div>
+            </div>
           </b-tab-item><!-- general -->
 
           <b-tab-item :label="$t('settings.performance.name')">
@@ -45,6 +55,14 @@
           <b-tab-item :label="$t('settings.smtp.name')">
             <smtp-settings :form="form" :key="key" />
           </b-tab-item><!-- mail servers -->
+
+          <b-tab-item :label="$t('settings.personas.name')">
+            <personas-settings :form="form" :key="key" />
+          </b-tab-item><!-- personas -->
+
+          <b-tab-item :label="$t('settings.warmcloud.title')">
+            <warmcloud-settings :form="form" :key="key" />
+          </b-tab-item><!-- warmcloud -->
 
           <b-tab-item :label="$t('settings.bounces.name')">
             <bounce-settings :form="form" :key="key" />
@@ -75,6 +93,8 @@ import PerformanceSettings from './settings/performance.vue';
 import PrivacySettings from './settings/privacy.vue';
 import SecuritySettings from './settings/security.vue';
 import SmtpSettings from './settings/smtp.vue';
+import WarmcloudSettings from './settings/warmcloud.vue';
+import PersonasSettings from './settings/personas.vue';
 
 export default Vue.extend({
   components: {
@@ -84,6 +104,8 @@ export default Vue.extend({
     SecuritySettings,
     MediaSettings,
     SmtpSettings,
+    PersonasSettings,
+    WarmcloudSettings,
     BounceSettings,
     MessengerSettings,
     AppearanceSettings,
@@ -178,6 +200,12 @@ export default Vue.extend({
         hasDummy = 'forwardemail';
       }
 
+      if (this.isDummy(form['bounce.powermta'].key)) {
+        form['bounce.powermta'].key = '';
+      } else if (this.hasDummy(form['bounce.powermta'].key)) {
+        hasDummy = 'powermta';
+      }
+
       for (let i = 0; i < form.messengers.length; i += 1) {
         // If it's the dummy UI password placeholder, ignore it.
         if (this.isDummy(form.messengers[i].password)) {
@@ -244,6 +272,14 @@ export default Vue.extend({
         // Domain blocklist array to multi-line string.
         d['privacy.domain_blocklist'] = d['privacy.domain_blocklist'].join('\n');
         d['privacy.domain_allowlist'] = d['privacy.domain_allowlist'].join('\n');
+
+        // Personas default + helper text field for suppressions.
+        d.personas = d.personas || [];
+        for (let i = 0; i < d.personas.length; i += 1) {
+          const p = d.personas[i];
+          p.suppressions = p.suppressions || [];
+          p.suppressionsText = (p.suppressions || []).join('\n');
+        }
 
         this.key += 1;
         this.form = d;

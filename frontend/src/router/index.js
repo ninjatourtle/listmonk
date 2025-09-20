@@ -90,6 +90,36 @@ const routes = [
     component: () => import('../views/CampaignAnalytics.vue'),
   },
   {
+    path: '/campaigns/:id/deliveries',
+    name: 'campaignDeliveries',
+    meta: { title: 'campaigns.deliveriesTitle', group: 'campaigns' },
+    component: () => import('../views/CampaignDeliveries.vue'),
+  },
+  {
+    path: '/sends',
+    name: 'recentSends',
+    meta: { title: 'sends.title', group: 'campaigns' },
+    component: () => import('../views/RecentSends.vue'),
+  },
+  {
+    path: '/warmcloud/sends',
+    name: 'warmcloudSends',
+    meta: { title: 'warmcloud.sends.title', group: 'smtp' },
+    component: () => import('../views/WarmcloudSends.vue'),
+  },
+  {
+    path: '/warmcloud/schedule',
+    name: 'warmcloudSchedule',
+    meta: { title: 'Расписание прогрева', group: 'smtp' },
+    component: () => import('../views/WarmcloudSchedule.vue'),
+  },
+  {
+    path: '/campaigns/schedule',
+    name: 'campaignSchedule',
+    meta: { title: 'Расписание кампаний', group: 'campaigns' },
+    component: () => import('../views/CampaignSchedule.vue'),
+  },
+  {
     path: '/campaigns/:id',
     name: 'campaign',
     meta: { title: 'globals.terms.campaign', group: 'campaigns' },
@@ -119,6 +149,13 @@ const routes = [
     meta: { title: 'smtp.stats.title' },
     component: () => import('../views/SmtpStats.vue'),
   },
+  {
+    path: '/smtp/sends',
+    name: 'smtpSends',
+    meta: { title: 'smtp.sends.title', group: 'campaigns' },
+    component: () => import('../views/SmtpSends.vue'),
+  },
+
   {
     path: '/users',
     name: 'users',

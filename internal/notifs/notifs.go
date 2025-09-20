@@ -63,6 +63,12 @@ func Initialize(opt Opt, tpls *template.Template, em *email.Emailer, lo *log.Log
 
 // NotifySystem sends out an e-mail notification to the admin emails.
 func NotifySystem(subject, tplName string, data any, hdr textproto.MIMEHeader) error {
+	// Mark as a system notification so downstream hooks can ignore it for
+	// generic SMTP send journals and stats.
+	if hdr == nil {
+		hdr = textproto.MIMEHeader{}
+	}
+	hdr.Set("X-Listmonk-System", "1")
 	return Notify(no.opt.SystemEmails, subject, tplName, data, hdr)
 }
 

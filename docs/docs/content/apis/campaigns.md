@@ -7,6 +7,7 @@
 | GET    | [/api/campaigns/{campaign_id}/preview](#get-apicampaignscampaign_idpreview) | Retrieve preview of a campaign.           |
 | GET    | [/api/campaigns/running/stats](#get-apicampaignsrunningstats)               | Retrieve stats of specified campaigns.    |
 | GET    | [/api/campaigns/analytics/{type}](#get-apicampaignsanalyticstype)           | Retrieve view counts for a  campaign.     |
+| GET    | [/api/campaigns/{campaign_id}/deliveries](#get-apicampaignscampaign_iddeliveries) | Retrieve per-recipient delivery status. |
 | POST   | [/api/campaigns](#post-apicampaigns)                                        | Create a new campaign.                    |
 | POST   | [/api/campaigns/{campaign_id}/test](#post-apicampaignscampaign_idtest)      | Test campaign with arbitrary subscribers. |
 | PUT    | [/api/campaigns/{campaign_id}](#put-apicampaignscampaign_id)                | Update a campaign.                        |
@@ -506,3 +507,34 @@ curl -u "api_user:token" -X DELETE 'http://localhost:9000/api/campaigns/34'
     "data": true
 }
 ```
+
+#### GET /api/campaigns/{campaign_id}/deliveries
+
+Retrieve a paginated list of recipients targeted by the campaign with their delivery status and timestamps.
+
+- Query params: `page`, `per_page`, `order_by` (email|name|status|sent_at|action_at), `order` (asc|desc), `status` (pending|sent|opened|clicked|bounced)
+
+Example
+
+```
+curl -u "api_user:token" -X GET 'http://localhost:9000/api/campaigns/123/deliveries?page=1&per_page=20&order_by=email&order=asc&status='
+```
+
+Response
+
+```
+{
+  "data": {
+    "results": [
+      {"subscriber_id": 10, "email": "user@example.com", "name": "User", "status": "opened", "sent_at": "2025-09-01T10:00:00Z", "action_at": "2025-09-01T10:05:12Z"}
+    ],
+    "total": 1000,
+    "per_page": 20,
+    "page": 1
+  }
+}
+```
+
+Notes
+
+- When individual tracking is disabled or no events are recorded, `status` may be `sent` or `pending` based on processing progress and timestamps may be null.

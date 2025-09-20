@@ -44,6 +44,7 @@ const (
 	CampaignStatusCancelled     = "cancelled"
 	CampaignTypeRegular         = "regular"
 	CampaignTypeOptin           = "optin"
+	CampaignTypeSequence        = "sequence"
 	CampaignContentTypeRichtext = "richtext"
 	CampaignContentTypeHTML     = "html"
 	CampaignContentTypeMarkdown = "markdown"
@@ -65,6 +66,7 @@ const (
 	// Headers attached to e-mails for bounce tracking.
 	EmailHeaderSubscriberUUID = "X-Listmonk-Subscriber"
 	EmailHeaderCampaignUUID   = "X-Listmonk-Campaign"
+	EmailHeaderReplyToken     = "X-Listmonk-Reply"
 
 	// Standard e-mail headers.
 	EmailHeaderDate        = "Date"
@@ -143,12 +145,17 @@ type Base struct {
 type Subscriber struct {
 	Base
 
-	UUID    string         `db:"uuid" json:"uuid"`
-	Email   string         `db:"email" json:"email" form:"email"`
-	Name    string         `db:"name" json:"name" form:"name"`
-	Attribs JSON           `db:"attribs" json:"attribs"`
-	Status  string         `db:"status" json:"status"`
-	Lists   types.JSONText `db:"lists" json:"lists"`
+	UUID    string `db:"uuid" json:"uuid"`
+	Email   string `db:"email" json:"email" form:"email"`
+	Name    string `db:"name" json:"name" form:"name"`
+	Attribs JSON   `db:"attribs" json:"attribs"`
+	Status  string `db:"status" json:"status"`
+	// Email validation fields (nullable)
+	ValidationStatus null.String    `db:"validation_status" json:"validation_status"`
+	ValidationReason null.String    `db:"validation_reason" json:"validation_reason"`
+	ValidatedAt      null.Time      `db:"validated_at" json:"validated_at"`
+	EmailType        null.String    `db:"email_type" json:"email_type"`
+	Lists            types.JSONText `db:"lists" json:"lists"`
 }
 type subLists struct {
 	SubscriberID int            `db:"subscriber_id"`
@@ -192,6 +199,8 @@ type SubscriberExport struct {
 	Status  string `db:"status" json:"status"`
 }
 
+//
+
 // List represents a mailing list.
 type List struct {
 	Base
@@ -221,11 +230,15 @@ type Campaign struct {
 	Base
 	CampaignMeta
 
-	UUID              string          `db:"uuid" json:"uuid"`
-	Type              string          `db:"type" json:"type"`
-	Name              string          `db:"name" json:"name"`
-	Subject           string          `db:"subject" json:"subject"`
-	FromEmail         string          `db:"from_email" json:"from_email"`
+	UUID      string      `db:"uuid" json:"uuid"`
+	Type      string      `db:"type" json:"type"`
+	Name      string      `db:"name" json:"name"`
+	Subject   string      `db:"subject" json:"subject"`
+	FromEmail string      `db:"from_email" json:"from_email"`
+	FromName  null.String `db:"from_name" json:"from_name"`
+	// Optional persona (by domain). If set, sender rotates over accounts in settings.personas for this domain.
+	PersonaDomain     null.String     `db:"persona_domain" json:"persona_domain"`
+	PersonaAccount    null.String     `db:"persona_account" json:"persona_account"`
 	Body              string          `db:"body" json:"body"`
 	BodySource        null.String     `db:"body_source" json:"body_source"`
 	AltBody           null.String     `db:"altbody" json:"altbody"`
@@ -240,6 +253,13 @@ type Campaign struct {
 	ArchiveSlug       null.String     `db:"archive_slug" json:"archive_slug"`
 	ArchiveTemplateID null.Int        `db:"archive_template_id" json:"archive_template_id"`
 	ArchiveMeta       json.RawMessage `db:"archive_meta" json:"archive_meta"`
+
+	// For drip/sequence campaigns: ordered steps with delays and content.
+	Sequence types.JSONText `db:"sequence" json:"sequence"`
+
+	// Per-campaign rate limiting: N messages per M minutes
+	RateWindowCount   int `db:"rate_window_count" json:"rate_window_count"`
+	RateWindowMinutes int `db:"rate_window_minutes" json:"rate_window_minutes"`
 
 	// TemplateBody is joined in from templates by the next-campaigns query.
 	TemplateBody        string             `db:"template_body" json:"-"`
@@ -260,6 +280,37 @@ type Campaign struct {
 	Total int `db:"total" json:"-"`
 }
 
+// Sequence and steps parsing helpers for sequence campaigns.
+type Sequence struct {
+	Steps []SequenceStep `json:"steps"`
+}
+
+type SequenceStep struct {
+	Subject    string       `json:"subject"`
+	DelayValue int          `json:"delayValue"`
+	DelayUnit  string       `json:"delayUnit"`
+	Content    *StepContent `json:"content"`
+	AltBody    *string      `json:"altbody"`
+}
+
+type StepContent struct {
+	ContentType string `json:"contentType"`
+	Body        string `json:"body"`
+	BodySource  string `json:"bodySource"`
+	TemplateID  int    `json:"templateId"`
+}
+
+func ParseSequence(j types.JSONText) (Sequence, error) {
+	var s Sequence
+	if len(j) == 0 {
+		return s, nil
+	}
+	if err := json.Unmarshal([]byte(j), &s); err != nil {
+		return Sequence{}, err
+	}
+	return s, nil
+}
+
 // CampaignMeta contains fields tracking a campaign's progress.
 type CampaignMeta struct {
 	CampaignID int `db:"campaign_id" json:"-"`
@@ -275,9 +326,11 @@ type CampaignMeta struct {
 	Lists types.JSONText `db:"lists" json:"lists"`
 	Media types.JSONText `db:"media" json:"media"`
 
-	StartedAt null.Time `db:"started_at" json:"started_at"`
-	ToSend    int       `db:"to_send" json:"to_send"`
-	Sent      int       `db:"sent" json:"sent"`
+	StartedAt        null.Time `db:"started_at" json:"started_at"`
+	ToSend           int       `db:"to_send" json:"to_send"`
+	Sent             int       `db:"sent" json:"sent"`
+	MaxSubscriberID  int       `db:"max_subscriber_id" json:"max_subscriber_id"`
+	LastSubscriberID int       `db:"last_subscriber_id" json:"last_subscriber_id"`
 }
 
 type CampaignStats struct {
@@ -342,6 +395,63 @@ type Bounce struct {
 	// Pseudofield for getting the total number of bounces
 	// in searches and queries.
 	Total int `db:"total" json:"-"`
+}
+
+// Reply represents a single reply event.
+type Reply struct {
+	ID             int             `db:"id" json:"id"`
+	CampaignID     int             `db:"campaign_id" json:"campaign_id"`
+	CampaignUUID   string          `db:"campaign_uuid" json:"campaign_uuid,omitempty"`
+	SubscriberID   int             `db:"subscriber_id" json:"subscriber_id"`
+	SubscriberUUID string          `db:"subscriber_uuid" json:"subscriber_uuid,omitempty"`
+	Email          string          `db:"email" json:"email"`
+	Subject        string          `db:"subject" json:"subject"`
+	Snippet        string          `db:"snippet" json:"snippet"`
+	ReplyToken     string          `db:"reply_token" json:"reply_token"`
+	MessageID      string          `db:"message_id" json:"message_id"`
+	InReplyTo      string          `db:"in_reply_to" json:"in_reply_to"`
+	Headers        json.RawMessage `db:"headers" json:"headers"`
+	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+
+	// Pseudofields used during processing.
+	SendID int64 `db:"send_id" json:"send_id"`
+}
+
+// Delivery represents per-subscriber delivery status for a campaign.
+type Delivery struct {
+	SubscriberID int       `db:"subscriber_id" json:"subscriber_id"`
+	Email        string    `db:"email" json:"email"`
+	Name         string    `db:"name" json:"name"`
+	Step         int       `db:"step" json:"step"`
+	Status       string    `db:"status" json:"status"`
+	SentAt       null.Time `db:"sent_at" json:"sent_at"`
+	ActionAt     null.Time `db:"action_at" json:"action_at"`
+	OpenedAt     null.Time `db:"opened_at" json:"opened_at"`
+	ClickedAt    null.Time `db:"clicked_at" json:"clicked_at"`
+	BouncedAt    null.Time `db:"bounced_at" json:"bounced_at"`
+	RepliedAt    null.Time `db:"replied_at" json:"replied_at"`
+
+	// Pseudofield for pagination total count.
+	Total int `db:"total" json:"-"`
+}
+
+// SendLog represents a single sent message event.
+type SendLog struct {
+	ID              int         `db:"id" json:"id"`
+	CampaignID      int         `db:"campaign_id" json:"campaign_id"`
+	CampaignName    string      `db:"campaign_name" json:"campaign_name"`
+	SubscriberID    int         `db:"subscriber_id" json:"subscriber_id"`
+	SubscriberEmail string      `db:"subscriber_email" json:"subscriber_email"`
+	SubscriberName  string      `db:"subscriber_name" json:"subscriber_name"`
+	Step            null.Int    `db:"step" json:"step"`
+	Subject         string      `db:"subject" json:"subject"`
+	FromEmail       string      `db:"from_email" json:"from_email"`
+	Success         bool        `db:"success" json:"success"`
+	Error           null.String `db:"error" json:"error"`
+	ReplyToken      string      `db:"reply_token" json:"reply_token"`
+	MessageID       string      `db:"message_id" json:"message_id"`
+	RepliedAt       null.Time   `db:"reply_at" json:"reply_at"`
+	CreatedAt       time.Time   `db:"created_at" json:"created_at"`
 }
 
 // Message is the message pushed to a Messenger.

@@ -8,6 +8,23 @@ listmonk is a standalone, self-hosted, newsletter and mailing list manager. It i
 
 Visit [listmonk.app](https://listmonk.app) for more info. Check out the [**live demo**](https://demo.listmonk.app).
 
+## 🆕 Recent Improvements (2025-01-15)
+
+### Enhanced Campaign & Warmup Schedule Interfaces
+- **Improved data display**: Fixed undefined campaign IDs and email fields
+- **Campaign status modal**: Added detailed campaign information with statistics
+- **Campaign grouping**: View statistics grouped by campaigns
+- **Quick filtering**: Filter by specific campaigns directly from the table
+- **Export functionality**: Export schedule data to CSV format
+- **Fixed modal windows**: Resolved 504 Gateway Time-out errors
+- **Warmup schedule improvements**: Added next send time display and quota control
+- **Server statistics**: Detailed statistics and quota monitoring for warmup servers
+- **Read count tracking**: Display of read email counts for warmup campaigns
+- **Pagination support**: Page-by-page navigation for large datasets
+- **Improved page size selector**: Dropdown selection for records per page (10, 50, 100, 500, 1000, all)
+
+See [CHANGELOG.md](./CHANGELOG.md) for detailed information about recent changes.
+
 ## Installation
 
 ### Docker

@@ -190,7 +190,10 @@ func (c *Core) CreateCampaign(o models.Campaign, listIDs []int, mediaIDs []int) 
 		o.ArchiveTemplateID,
 		o.ArchiveMeta,
 		pq.Array(mediaIDs),
+		o.Sequence,
 		o.BodySource,
+		o.RateWindowCount,
+		o.RateWindowMinutes,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return models.Campaign{}, echo.NewHTTPError(http.StatusBadRequest, c.i18n.T("campaigns.noSubs"))
@@ -204,6 +207,31 @@ func (c *Core) CreateCampaign(o models.Campaign, listIDs []int, mediaIDs []int) 
 	out, err := c.GetCampaign(newID, "", "")
 	if err != nil {
 		return models.Campaign{}, err
+	}
+
+	// Set persona_domain if provided (done as a separate query to avoid touching big insert CTE)
+	if o.PersonaDomain.Valid {
+		if _, e := c.q.UpdateCampaignPersona.Exec(newID, o.PersonaDomain.String); e != nil {
+			c.log.Printf("error setting campaign persona_domain: %v", e)
+		} else {
+			out.PersonaDomain = o.PersonaDomain
+		}
+	}
+	// Set persona_account if provided
+	if o.PersonaAccount.Valid {
+		if _, e := c.q.UpdateCampaignPersonaAccount.Exec(newID, o.PersonaAccount.String); e != nil {
+			c.log.Printf("error setting campaign persona_account: %v", e)
+		} else {
+			out.PersonaAccount = o.PersonaAccount
+		}
+	}
+	// Set from_name if provided
+	if o.FromName.Valid {
+		if _, e := c.q.UpdateCampaignFromName.Exec(newID, o.FromName.String); e != nil {
+			c.log.Printf("error setting campaign from_name: %v", e)
+		} else {
+			out.FromName = o.FromName
+		}
 	}
 
 	return out, nil
@@ -229,16 +257,74 @@ func (c *Core) UpdateCampaign(id int, o models.Campaign, listIDs []int, mediaIDs
 		o.ArchiveTemplateID,
 		o.ArchiveMeta,
 		pq.Array(mediaIDs),
-		o.BodySource)
+		o.BodySource,
+		o.Sequence,
+		// new $21 placeholder for persona_domain in update-campaign query
+		o.PersonaDomain.String,
+		o.RateWindowCount,
+		o.RateWindowMinutes)
 	if err != nil {
 		c.log.Printf("error updating campaign: %v", err)
 		return models.Campaign{}, echo.NewHTTPError(http.StatusInternalServerError,
 			c.i18n.Ts("globals.messages.errorUpdating", "name", "{globals.terms.campaign}", "error", pqErrMsg(err)))
 	}
 
+	// If persona was cleared (empty string), ensure it is NULL.
+	if !o.PersonaDomain.Valid || o.PersonaDomain.String == "" {
+		_, _ = c.q.UpdateCampaignPersona.Exec(id, "")
+	}
+	// Update from_name separately (set or clear)
+	if o.FromName.Valid && o.FromName.String != "" {
+		_, _ = c.q.UpdateCampaignFromName.Exec(id, o.FromName.String)
+	} else {
+		_, _ = c.q.UpdateCampaignFromName.Exec(id, "")
+	}
+	// Update persona domain and account separately
+	if o.PersonaDomain.Valid {
+		_, _ = c.q.UpdateCampaignPersona.Exec(id, o.PersonaDomain.String)
+	} else {
+		_, _ = c.q.UpdateCampaignPersona.Exec(id, "")
+	}
+	if o.PersonaAccount.Valid {
+		_, _ = c.q.UpdateCampaignPersonaAccount.Exec(id, o.PersonaAccount.String)
+	} else {
+		_, _ = c.q.UpdateCampaignPersonaAccount.Exec(id, "")
+	}
+
 	out, err := c.GetCampaign(id, "", "")
 	if err != nil {
 		return models.Campaign{}, err
+	}
+
+	// Rebuild campaign schedule windows if per-campaign rate limiting is configured.
+	if out.RateWindowCount > 0 && out.RateWindowMinutes > 0 {
+		// Remaining recipients
+		remaining := out.ToSend - out.Sent
+		if remaining < 0 {
+			remaining = 0
+		}
+		// Clear future pending windows and replan from now (or send_at if in future)
+		_, _ = c.q.CampSchedDeleteFuture.Exec(out.ID)
+		if remaining > 0 {
+			start := time.Now()
+			if out.SendAt.Valid && out.SendAt.Time.After(start) {
+				start = out.SendAt.Time
+			}
+			window := time.Duration(out.RateWindowMinutes) * time.Minute
+			slots := (remaining + out.RateWindowCount - 1) / out.RateWindowCount
+			for i := 0; i < slots; i++ {
+				due := start.Add(time.Duration(i) * window)
+				q := out.RateWindowCount
+				if q > remaining {
+					q = remaining
+				}
+				_, _ = c.q.CampSchedInsert.Exec(out.ID, due, q)
+				remaining -= q
+			}
+		}
+	} else {
+		// If disabled, clear any existing future windows.
+		_, _ = c.q.CampSchedDeleteFuture.Exec(out.ID)
 	}
 
 	return out, nil

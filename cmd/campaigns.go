@@ -500,6 +500,8 @@ func (a *App) TestCampaign(c echo.Context) error {
 	camp.Name = req.Name
 	camp.Subject = req.Subject
 	camp.FromEmail = req.FromEmail
+	camp.PersonaDomain = req.PersonaDomain
+	camp.FromName = req.FromName
 	camp.Body = req.Body
 	camp.AltBody = req.AltBody
 	camp.Messenger = req.Messenger
@@ -599,9 +601,19 @@ func (a *App) validateCampaignFields(c campReq) (campReq, error) {
 		return c, errors.New(a.i18n.T("campaigns.fieldInvalidName"))
 	}
 
+	// If persona is selected, from_name is mandatory.
+	if c.PersonaDomain.Valid && strings.TrimSpace(c.PersonaDomain.String) != "" {
+		if !c.FromName.Valid || !strHasLen(strings.TrimSpace(c.FromName.String), 1, stdInputMaxLen) {
+			return c, errors.New(a.i18n.T("campaigns.fieldRequiredFromNamePersona"))
+		}
+	}
+
 	// Larger char limit for subject as it can contain {{ go templating }} logic.
-	if !strHasLen(c.Subject, 1, 5000) {
-		return c, errors.New(a.i18n.T("campaigns.fieldInvalidSubject"))
+	// For sequence campaigns, allow empty subject at campaign level (subjects live per step).
+	if c.Type != models.CampaignTypeSequence {
+		if !strHasLen(c.Subject, 1, 5000) {
+			return c, errors.New(a.i18n.T("campaigns.fieldInvalidSubject"))
+		}
 	}
 
 	// If no content-type is specified, default to richtext.
@@ -632,9 +644,12 @@ func (a *App) validateCampaignFields(c campReq) (campReq, error) {
 		return c, errors.New(a.i18n.Ts("campaigns.fieldInvalidMessenger", "name", c.Messenger))
 	}
 
-	camp := models.Campaign{Body: c.Body, TemplateBody: tplTag}
-	if err := c.CompileTemplate(a.manager.TemplateFuncs(&camp)); err != nil {
-		return c, errors.New(a.i18n.Ts("campaigns.fieldInvalidBody", "error", err.Error()))
+	// For sequence campaigns, skip compiling a single campaign body; each step will be compiled when sent.
+	if c.Type != models.CampaignTypeSequence {
+		camp := models.Campaign{Body: c.Body, TemplateBody: tplTag}
+		if err := c.CompileTemplate(a.manager.TemplateFuncs(&camp)); err != nil {
+			return c, errors.New(a.i18n.Ts("campaigns.fieldInvalidBody", "error", err.Error()))
+		}
 	}
 
 	if len(c.Headers) == 0 {

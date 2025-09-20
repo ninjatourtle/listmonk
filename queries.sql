@@ -157,6 +157,15 @@ UPDATE subscribers SET
     updated_at=NOW()
 WHERE id = $1;
 
+-- name: update-subscriber-validation
+UPDATE subscribers SET
+    validation_status=$2,
+    validation_reason=$3,
+    email_type=$4,
+    validated_at=(CASE WHEN $5::TIMESTAMP WITH TIME ZONE IS NULL THEN NOW() ELSE $5 END),
+    updated_at=NOW()
+WHERE id = $1;
+
 -- name: update-subscriber-with-lists
 -- Updates a subscriber's data, and given a list of list_ids, inserts subscriptions
 -- for them while deleting existing subscriptions not in the list.
@@ -198,6 +207,9 @@ INSERT INTO subscriber_lists (subscriber_id, list_id, status)
 -- name: delete-subscribers
 -- Delete one or more subscribers by ID or UUID.
 DELETE FROM subscribers WHERE CASE WHEN ARRAY_LENGTH($1::INT[], 1) > 0 THEN id = ANY($1) ELSE uuid = ANY($2::UUID[]) END;
+
+-- name: get-email-domain-labels
+SELECT domain, label, disposable, free, public_private FROM email_domain_labels WHERE domain = ANY($1::TEXT[]);
 
 -- name: delete-blocklisted-subscribers
 DELETE FROM subscribers WHERE status = 'blocklisted';
@@ -539,7 +551,8 @@ counts AS (
 camp AS (
     INSERT INTO campaigns (uuid, type, name, subject, from_email, body, altbody,
         content_type, send_at, headers, tags, messenger, template_id, to_send,
-        max_subscriber_id, archive, archive_slug, archive_template_id, archive_meta, body_source)
+        max_subscriber_id, archive, archive_slug, archive_template_id, archive_meta, sequence, body_source,
+        rate_window_count, rate_window_minutes)
         SELECT $1, $2, $3, $4, $5,
             -- body
             COALESCE(NULLIF($6, ''), (SELECT body FROM tpl), ''),
@@ -553,8 +566,13 @@ camp AS (
             -- archive_template_id
             $17,
             $18,
+            -- sequence
+            COALESCE($20, '[]'::JSONB),
             -- body_source
-            COALESCE($20, (SELECT body_source FROM tpl))
+            COALESCE($21, (SELECT body_source FROM tpl)),
+            -- rate limiting per-campaign
+            COALESCE($22, 0),
+            COALESCE($23, 0)
         RETURNING id
 ),
 med AS (
@@ -854,6 +872,80 @@ u AS (
 )
 SELECT * FROM subs;
 
+-- name: next-sequence-subscribers
+-- Returns a batch of due subscribers for sequence campaigns based on per-subscriber next_send_at or campaign send_at for step 0.
+WITH camp AS (
+    SELECT id, type, send_at FROM campaigns WHERE id = $1
+),
+camp_lists AS (
+    SELECT l.id AS list_id, l.optin
+    FROM lists l
+    JOIN campaign_lists cl ON cl.list_id = l.id
+    WHERE cl.campaign_id = $1
+),
+eligible AS (
+    SELECT DISTINCT s.id
+    FROM subscriber_lists sl
+    JOIN camp_lists cl ON sl.list_id = cl.list_id
+    JOIN subscribers s ON s.id = sl.subscriber_id
+    WHERE
+        s.status != 'blocklisted'
+        AND (
+            -- Opt-in campaign to double-optin lists: only unconfirmed.
+            ((SELECT type FROM camp) = 'optin' AND sl.status = 'unconfirmed' AND cl.optin = 'double')
+            OR (
+                -- Regular campaign.
+                (SELECT type FROM camp) != 'optin' AND (
+                    -- Double opt-in list: only confirmed.
+                    (cl.optin = 'double' AND sl.status = 'confirmed')
+                    OR
+                    -- Single opt-in list: not unsubscribed.
+                    (cl.optin != 'double' AND sl.status != 'unsubscribed')
+                )
+            )
+        )
+),
+due AS (
+    SELECT e.id AS subscriber_id
+    FROM eligible e
+    LEFT JOIN campaign_sequence_progress p ON (p.campaign_id = $1 AND p.subscriber_id = e.id)
+    JOIN camp c ON TRUE
+    WHERE COALESCE(p.next_send_at, c.send_at, NOW()) <= NOW()
+      AND COALESCE(p.status, 'pending') = 'pending'
+    ORDER BY COALESCE(p.next_send_at, c.send_at) ASC, e.id
+    LIMIT $2
+)
+SELECT s.* FROM due
+JOIN subscribers s ON s.id = due.subscriber_id
+ORDER BY s.id;
+
+-- name: get-sequence-progress
+SELECT current_step, next_send_at, status, from_email FROM campaign_sequence_progress WHERE campaign_id=$1 AND subscriber_id=$2;
+
+-- name: advance-sequence-progress
+INSERT INTO campaign_sequence_progress (campaign_id, subscriber_id, current_step, next_send_at, last_sent_at, status)
+VALUES ($1, $2, $3, COALESCE($4::TIMESTAMPTZ, NOW() + INTERVAL '100 years'), NOW(), $5)
+ON CONFLICT (campaign_id, subscriber_id)
+DO UPDATE SET current_step=$3, next_send_at=COALESCE($4::TIMESTAMPTZ, NOW() + INTERVAL '100 years'), last_sent_at=NOW(), status=$5;
+
+-- name: set-sequence-from-email
+INSERT INTO campaign_sequence_progress (campaign_id, subscriber_id, current_step, next_send_at, last_sent_at, status, from_email)
+VALUES ($1, $2, 0, NOW() + INTERVAL '100 years', NOW(), 'pending', $3)
+ON CONFLICT (campaign_id, subscriber_id)
+DO UPDATE SET from_email = COALESCE(campaign_sequence_progress.from_email, EXCLUDED.from_email);
+
+-- name: get-earliest-sequence-next
+WITH p AS (
+    SELECT MIN(next_send_at) AS t FROM campaign_sequence_progress WHERE campaign_id=$1 AND status='pending' AND next_send_at > NOW()
+),
+c AS (
+    SELECT (CASE WHEN send_at > NOW() THEN send_at ELSE NULL END) AS t FROM campaigns WHERE id=$1
+)
+SELECT COALESCE((SELECT t FROM p), (SELECT t FROM c)) AS next_time;
+
+-- name: update-campaign-send-at
+UPDATE campaigns SET send_at=$2::TIMESTAMPTZ, status=(CASE WHEN $3 != '' THEN $3::campaign_status ELSE status END), updated_at=NOW() WHERE id=$1;
+
 -- name: delete-campaign-views
 DELETE FROM campaign_views WHERE created_at < $1;
 
@@ -874,6 +966,7 @@ WITH camp AS (
         name=$2,
         subject=$3,
         from_email=$4,
+        persona_domain=(CASE WHEN $21 = '' THEN NULL ELSE $21 END),
         body=$5,
         altbody=(CASE WHEN $6 = '' THEN NULL ELSE $6 END),
         content_type=$7::content_type,
@@ -893,7 +986,10 @@ WITH camp AS (
         archive_slug=$15,
         archive_template_id=(CASE WHEN $7::content_type = 'visual' THEN NULL ELSE $16::INT END),
         archive_meta=$17,
+        sequence=$20,
         body_source=$19,
+        rate_window_count=$22,
+        rate_window_minutes=$23,
         updated_at=NOW()
     WHERE id = $1 RETURNING id
 ),
@@ -913,6 +1009,101 @@ medi AS (
 INSERT INTO campaign_lists (campaign_id, list_id, list_name)
     (SELECT $1 as campaign_id, id, name FROM lists WHERE id=ANY($13::INT[]))
     ON CONFLICT (campaign_id, list_id) DO UPDATE SET list_name = EXCLUDED.list_name;
+
+-- name: update-campaign-persona
+UPDATE campaigns SET persona_domain=(CASE WHEN $2 = '' THEN NULL ELSE $2 END) WHERE id=$1;
+
+-- name: update-campaign-persona-account
+UPDATE campaigns SET persona_account=(CASE WHEN $2 = '' THEN NULL ELSE $2 END) WHERE id=$1;
+
+-- name: update-campaign-from-name
+UPDATE campaigns SET from_name=(CASE WHEN $2 = '' THEN NULL ELSE $2 END) WHERE id=$1;
+
+-- name: query-campaign-deliveries
+-- Returns per-subscriber delivery status for a campaign with pagination.
+-- Params:
+-- $1: campaign_id (INT)
+-- $2: offset (INT)
+-- $3: limit (INT)
+-- $4: status filter (TEXT) one of 'pending','sent','opened','clicked','bounced' or '' for all
+WITH camp AS (
+    SELECT id, type AS campaign_type, status, started_at, last_subscriber_id
+    FROM campaigns WHERE id = $1
+),
+camp_lists AS (
+    SELECT l.id AS list_id, l.optin
+    FROM lists l
+    JOIN campaign_lists cl ON cl.list_id = l.id
+    WHERE cl.campaign_id = $1
+),
+subs AS (
+    SELECT DISTINCT s.id, s.email, s.name
+    FROM subscriber_lists sl
+    JOIN camp_lists cl ON sl.list_id = cl.list_id
+    JOIN subscribers s ON s.id = sl.subscriber_id
+    WHERE
+        s.status != 'blocklisted'
+        AND (
+            -- Opt-in campaign to double-optin lists: only unconfirmed.
+            ((SELECT campaign_type FROM camp) = 'optin' AND sl.status = 'unconfirmed' AND cl.optin = 'double')
+            OR (
+                -- Regular campaign.
+                (SELECT campaign_type FROM camp) != 'optin' AND (
+                    -- Double opt-in list: only confirmed.
+                    (cl.optin = 'double' AND sl.status = 'confirmed')
+                    OR
+                    -- Single opt-in list: not unsubscribed.
+                    (cl.optin != 'double' AND sl.status != 'unsubscribed')
+                )
+            )
+        )
+),
+ev AS (
+    SELECT s.id AS subscriber_id,
+           MIN(cv.created_at) AS opened_at,
+           MIN(lc.created_at) AS clicked_at,
+           MIN(b.created_at)  AS bounced_at,
+           MIN(cr.created_at) AS replied_at
+    FROM subs s
+    LEFT JOIN campaign_views cv ON cv.campaign_id = $1 AND cv.subscriber_id = s.id
+    LEFT JOIN link_clicks   lc ON lc.campaign_id = $1 AND lc.subscriber_id = s.id
+    LEFT JOIN bounces        b ON b.campaign_id = $1 AND b.subscriber_id = s.id
+    LEFT JOIN campaign_replies cr ON cr.campaign_id = $1 AND cr.subscriber_id = s.id
+    GROUP BY s.id
+),
+rows AS (
+    SELECT
+        s.id    AS subscriber_id,
+        s.email AS email,
+        s.name  AS name,
+        ev.opened_at,
+        ev.clicked_at,
+        ev.bounced_at,
+        ev.replied_at,
+        COALESCE(p.current_step, 0) AS step,
+        CASE
+            WHEN ev.replied_at IS NOT NULL THEN 'replied'
+            WHEN ev.bounced_at IS NOT NULL THEN 'bounced'
+            WHEN ev.clicked_at IS NOT NULL THEN 'clicked'
+            WHEN ev.opened_at IS NOT NULL THEN 'opened'
+            WHEN (SELECT status FROM camp) IN ('finished','cancelled') OR s.id <= COALESCE((SELECT last_subscriber_id FROM camp), 0) THEN 'sent'
+            ELSE 'pending'
+        END AS status,
+        CASE
+            WHEN (SELECT status FROM camp) IN ('finished','cancelled') OR s.id <= COALESCE((SELECT last_subscriber_id FROM camp), 0)
+                THEN (SELECT started_at FROM camp)
+            ELSE NULL
+        END AS sent_at,
+        COALESCE(ev.replied_at, ev.clicked_at, ev.opened_at, ev.bounced_at) AS action_at
+    FROM subs s
+    LEFT JOIN ev ON ev.subscriber_id = s.id
+    LEFT JOIN campaign_sequence_progress p ON (p.campaign_id = $1 AND p.subscriber_id = s.id)
+)
+SELECT (SELECT COUNT(*) FROM subs) AS total, *
+FROM rows
+WHERE ($4 = '' OR status = $4)
+ORDER BY %order%
+OFFSET $2 LIMIT $3;
 
 -- name: update-campaign-counts
 UPDATE campaigns SET
@@ -1039,6 +1230,105 @@ SELECT data FROM mat_dashboard_charts;
 -- name: get-dashboard-counts
 SELECT data FROM mat_dashboard_counts;
 
+-- name: get-recent-campaign-views
+SELECT cv.created_at, s.email, s.name, c.id AS campaign_id, c.name AS campaign_name
+FROM campaign_views cv
+LEFT JOIN subscribers s ON s.id = cv.subscriber_id
+LEFT JOIN campaigns c ON c.id = cv.campaign_id
+ORDER BY cv.created_at DESC
+LIMIT $1;
+
+-- Campaign schedule (window-based)
+-- name: camp-sched-insert
+INSERT INTO campaign_schedule (campaign_id, due_at, quota, subscriber_id, email_to, email_from, subject) VALUES ($1, $2, $3, $4, $5, $6, $7);
+
+-- name: camp-sched-delete-future
+DELETE FROM campaign_schedule WHERE campaign_id = $1 AND status = 'pending' AND due_at >= NOW();
+
+-- name: camp-sched-delete-outdated
+DELETE FROM campaign_schedule WHERE campaign_id = $1 AND status = 'pending' AND due_at < NOW() - INTERVAL '1 hour';
+
+-- name: camp-sched-next-due
+SELECT id, due_at, quota, used, subscriber_id, email_to, email_from, subject FROM campaign_schedule
+WHERE campaign_id = $1 AND status = 'pending'
+ORDER BY due_at ASC
+LIMIT 1;
+
+-- name: camp-sched-consume
+UPDATE campaign_schedule SET
+    used = used + $2,
+    status = CASE WHEN used + $2 >= quota THEN 'done' ELSE status END,
+    updated_at = NOW()
+WHERE id = $1
+RETURNING id, due_at, quota, used, status;
+
+-- name: camp-sched-list-by-day
+SELECT cs.id, cs.campaign_id, cs.due_at, cs.quota, cs.used, cs.status,
+       COALESCE(cs.email_from, '') AS email_from,
+       COALESCE(cs.email_to, '')   AS email_to,
+       COALESCE(cs.subject, '')    AS subject,
+       COALESCE(cs.error, '')      AS error,
+       c.name AS campaign_name,
+       c.status AS campaign_status
+FROM campaign_schedule cs
+JOIN campaigns c ON c.id = cs.campaign_id
+WHERE ($1 = 0 OR cs.campaign_id = $1)
+  AND cs.due_at >= $2::date AND cs.due_at < ($2::date + INTERVAL '1 day')
+ORDER BY cs.due_at ASC
+OFFSET $3 LIMIT $4;
+
+-- name: camp-sched-reschedule
+UPDATE campaign_schedule
+SET due_at = $2, status = 'pending', used = 0, updated_at = NOW()
+WHERE id = $1;
+
+-- name: camp-sched-delete
+DELETE FROM campaign_schedule WHERE id = $1;
+
+-- name: camp-sched-skip
+UPDATE campaign_schedule SET status = 'done', used = quota, updated_at = NOW() WHERE id = $1;
+
+-- name: camp-sched-mark-done-email
+UPDATE campaign_schedule SET status = 'done', used = quota, email_to = $2, email_from = $3, subject = $4, updated_at = NOW()
+WHERE id = $1;
+
+-- name: camp-sched-assign-subscriber
+UPDATE campaign_schedule SET subscriber_id = $2, email_to = $3, updated_at = NOW()
+WHERE id = $1 AND subscriber_id IS NULL;
+
+-- name: camp-sched-insert-batch
+INSERT INTO campaign_schedule (campaign_id, due_at, quota, subscriber_id, email_to, email_from, subject) 
+VALUES ($1, $2, $3, $4, $5, $6, $7);
+
+-- name: camp-sched-get-campaign-subscribers
+SELECT s.id, s.email FROM subscribers s
+JOIN subscriber_lists sl ON s.id = sl.subscriber_id
+JOIN campaign_lists cl ON sl.list_id = cl.list_id
+WHERE cl.campaign_id = $1 
+  AND s.status != 'blocklisted'
+  AND s.id > $2
+  AND s.id <= $3
+  AND (
+    ($4 = 'optin' AND sl.status = 'unconfirmed')
+    OR ($4 != 'optin' AND (
+      (sl.status = 'confirmed') OR (sl.status != 'unsubscribed')
+    ))
+  )
+ORDER BY s.id
+LIMIT $5;
+
+-- name: update-campaign-max-subscriber-id
+UPDATE campaigns SET max_subscriber_id = $2, updated_at = NOW() WHERE id = $1;
+
+-- name: get-recent-link-clicks
+SELECT lc.created_at, s.email, s.name, c.id AS campaign_id, c.name AS campaign_name, l.url
+FROM link_clicks lc
+LEFT JOIN subscribers s ON s.id = lc.subscriber_id
+LEFT JOIN campaigns c ON c.id = lc.campaign_id
+LEFT JOIN links l ON l.id = lc.link_id
+ORDER BY lc.created_at DESC
+LIMIT $1;
+
 -- name: get-settings
 SELECT JSON_OBJECT_AGG(key, value) AS settings FROM (SELECT * FROM settings ORDER BY key) t;
 
@@ -1046,6 +1336,13 @@ SELECT JSON_OBJECT_AGG(key, value) AS settings FROM (SELECT * FROM settings ORDE
 UPDATE settings AS s SET value = c.value
     -- For each key in the incoming JSON map, update the row with the key and its value.
     FROM(SELECT * FROM JSONB_EACH($1)) AS c(key, value) WHERE s.key = c.key;
+
+-- name: upsert-settings
+-- Insert missing settings keys from the incoming JSON map.
+INSERT INTO settings (key, value)
+SELECT c.key, c.value
+FROM (SELECT * FROM JSONB_EACH($1)) AS c(key, value)
+WHERE NOT EXISTS (SELECT 1 FROM settings s WHERE s.key = c.key);
 
 -- name: record-bounce
 -- Insert a bounce and count the bounces for the subscriber and either unsubscribe them,
@@ -1329,3 +1626,166 @@ UPDATE roles SET name=$2, permissions=$3 WHERE id=$1 and parent_id IS NULL RETUR
 
 -- name: delete-role
 DELETE FROM roles WHERE id=$1;
+
+-- smtp stats: increment (name, today)
+-- name: smtp-increment
+INSERT INTO smtp_stats (name, day, sent)
+VALUES ($1, CURRENT_DATE, 1)
+ON CONFLICT (name, day) DO UPDATE SET sent = smtp_stats.sent + 1;
+
+-- smtp stats: get today's count
+-- name: smtp-get-today
+SELECT COALESCE((SELECT sent FROM smtp_stats WHERE name = $1 AND day = CURRENT_DATE), 0);
+
+-- smtp stats: set today's count to an explicit value
+-- name: smtp-set-today
+INSERT INTO smtp_stats (name, day, sent)
+VALUES ($1, CURRENT_DATE, $2)
+ON CONFLICT (name, day) DO UPDATE SET sent = EXCLUDED.sent;
+
+-- smtp stats: get total count
+-- name: smtp-get-total
+SELECT COALESCE(SUM(sent), 0) FROM smtp_stats WHERE name = $1;
+
+-- smtp stats: get the latest (most recent day) row for a key
+-- name: smtp-get-latest
+SELECT sent, day FROM smtp_stats WHERE name = $1 ORDER BY day DESC LIMIT 1;
+
+-- WarmCloud schedule
+-- name: warmcloud-sched-insert
+INSERT INTO warmcloud_schedule (server, due_at)
+VALUES ($1, $2)
+ON CONFLICT (server, due_at)
+DO UPDATE SET updated_at = NOW();
+
+-- name: warmcloud-sched-delete-future
+DELETE FROM warmcloud_schedule WHERE server = $1 AND status = 'pending' AND due_at >= NOW();
+
+-- name: warmcloud-sched-next-due-by-server
+SELECT id, server, due_at FROM warmcloud_schedule
+WHERE server = $1 AND status = 'pending' AND due_at <= NOW()
+ORDER BY due_at ASC
+LIMIT 1;
+
+-- name: warmcloud-sched-next-due-with-from-email
+SELECT id, server, due_at, COALESCE(from_email, '') AS from_email FROM warmcloud_schedule
+WHERE server = $1 AND status = 'pending' AND due_at <= NOW()
+ORDER BY due_at ASC
+LIMIT 1;
+
+-- name: warmcloud-sched-mark-done
+UPDATE warmcloud_schedule SET status = 'done', updated_at = NOW() WHERE id = $1;
+
+-- name: warmcloud-sched-mark-done-email
+UPDATE warmcloud_schedule SET status = 'done', email = $2, updated_at = NOW() WHERE id = $1;
+
+-- name: warmcloud-sched-mark-error
+UPDATE warmcloud_schedule SET status = 'error', error = $2, updated_at = NOW() WHERE id = $1;
+
+-- name: warmcloud-sched-mark-read
+UPDATE warmcloud_schedule SET status = 'read', updated_at = NOW() WHERE id = $1;
+
+-- name: warmcloud-sched-mark-read-email
+UPDATE warmcloud_schedule SET status = 'read', email = $2, updated_at = NOW() WHERE id = $1;
+
+-- name: warmcloud-sched-update-from-email
+UPDATE warmcloud_schedule SET from_email = $2, updated_at = NOW() WHERE id = $1;
+
+
+-- name: warmcloud-sched-count-pending-today
+SELECT COUNT(*) FROM warmcloud_schedule WHERE server = $1 AND status = 'pending' AND due_at >= CURRENT_DATE AND due_at < (CURRENT_DATE + INTERVAL '1 day');
+
+-- name: warmcloud-sched-count-pending-window
+SELECT COUNT(*) FROM warmcloud_schedule
+WHERE server = $1 AND status = 'pending' AND due_at >= $2 AND due_at < $3;
+
+-- name: warmcloud-sched-list-by-day
+SELECT id, server, due_at, status, COALESCE(error,'') AS error, COALESCE(email,'') AS email, COALESCE(from_email,'') AS from_email, COALESCE(subject,'') AS subject, COALESCE(persona,'') AS persona
+FROM warmcloud_schedule
+WHERE server = $1 AND due_at >= $2::date AND due_at < ($2::date + INTERVAL '1 day')
+ORDER BY due_at ASC
+LIMIT (CASE WHEN $3 < 1 THEN 1000 ELSE $3 END) OFFSET (CASE WHEN $4 < 0 THEN 0 ELSE $4 END);
+
+-- name: warmcloud-sched-delete-day-pending
+DELETE FROM warmcloud_schedule WHERE server = $1 AND status = 'pending' AND due_at >= $2::date AND due_at < ($2::date + INTERVAL '1 day');
+
+-- name: warmcloud-sched-insert-with-from-email
+INSERT INTO warmcloud_schedule (server, due_at, from_email)
+VALUES ($1, $2, $3)
+ON CONFLICT (server, due_at)
+DO UPDATE SET from_email = EXCLUDED.from_email,
+              updated_at = NOW();
+
+-- name: warmcloud-sched-insert-with-from-email-subject
+INSERT INTO warmcloud_schedule (server, due_at, from_email, subject, persona)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (server, due_at)
+DO UPDATE SET from_email = EXCLUDED.from_email,
+              subject    = EXCLUDED.subject,
+              persona    = EXCLUDED.persona,
+              updated_at = NOW();
+
+-- name: warmcloud-sched-list-day-basic
+SELECT id, due_at, status,
+       COALESCE(from_email, '') AS from_email,
+       COALESCE(subject, '') AS subject,
+       COALESCE(persona, '') AS persona
+FROM warmcloud_schedule
+WHERE server = $1 AND due_at >= $2::date AND due_at < ($2::date + INTERVAL '1 day')
+ORDER BY due_at ASC;
+
+-- name: warmcloud-sched-update-persona
+UPDATE warmcloud_schedule
+SET persona = $2, updated_at = NOW()
+WHERE id = $1;
+
+-- name: warmcloud-sched-get-sent-today
+SELECT COUNT(*) FROM warmcloud_schedule 
+WHERE server = $1 AND due_at >= $2::date AND due_at < ($2::date + INTERVAL '1 day') AND status IN ('done', 'read', 'error');
+
+-- name: warmcloud-sched-mark-all-today-done
+UPDATE warmcloud_schedule SET status = 'done', updated_at = NOW() 
+WHERE server = $1 AND due_at >= $2::date AND due_at < ($2::date + INTERVAL '1 day') AND status = 'pending';
+
+-- name: warmcloud-sched-delete-unsent-only
+DELETE FROM warmcloud_schedule WHERE server = $1 AND status = 'pending';
+
+-- name: warmcloud-sched-delete-all
+DELETE FROM warmcloud_schedule WHERE server = $1;
+-- name: insert-campaign-send
+INSERT INTO campaign_sends (campaign_id, subscriber_id, step, subject, from_email, success, error, reply_token, message_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+
+-- name: update-campaign-send-replied
+UPDATE campaign_sends
+SET reply_at = COALESCE($2, NOW())
+WHERE id = $1;
+
+-- name: get-campaign-send-by-reply-token
+SELECT id, campaign_id, subscriber_id, reply_token, message_id
+FROM campaign_sends
+WHERE reply_token = $1
+LIMIT 1;
+
+-- name: get-campaign-send-by-message-id
+SELECT id, campaign_id, subscriber_id, reply_token, message_id
+FROM campaign_sends
+WHERE message_id = $1
+LIMIT 1;
+
+-- name: insert-campaign-reply
+INSERT INTO campaign_replies (campaign_id, subscriber_id, send_id, email, reply_token, message_id, in_reply_to, subject, snippet, headers, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::JSONB, $11)
+RETURNING id;
+
+-- name: query-recent-sends
+-- Returns recent send events, optionally filtered by campaign_id
+SELECT s.id, s.campaign_id, s.subscriber_id, s.step, s.subject, s.from_email, s.success, s.error, s.reply_token, s.message_id, s.reply_at, s.created_at,
+       sub.email AS subscriber_email, sub.name AS subscriber_name,
+        c.name AS campaign_name
+FROM campaign_sends s
+LEFT JOIN subscribers sub ON sub.id = s.subscriber_id
+LEFT JOIN campaigns c ON c.id = s.campaign_id
+WHERE ($1 = 0 OR s.campaign_id = $1)
+ORDER BY s.created_at DESC
+LIMIT (CASE WHEN $2 < 1 THEN 100 ELSE $2 END);

@@ -220,6 +220,29 @@ func (a *App) BounceWebhook(c echo.Context) error {
 		}
 		bounces = append(bounces, bs...)
 
+	// PowerMTA.
+	case service == "powermta" && a.cfg.BouncePowermtaEnabled:
+		var (
+			sig   = c.Request().Header.Get("X-Webhook-Signature")
+			token = c.Request().Header.Get("X-PMTA-Token")
+		)
+
+		bs, evs, err := a.bounce.Powermta.ProcessAccounting(sig, token, rawReq)
+		if err != nil {
+			a.log.Printf("error processing powermta notification: %v", err)
+			if _, ok := err.(*echo.HTTPError); ok {
+				return err
+			}
+			return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("globals.messages.invalidData"))
+		}
+		// Bounces
+		bounces = append(bounces, bs...)
+		// Non-bounce accounting events (sent/queued)
+		for _, ev := range evs {
+			_, _ = a.db.Exec(`INSERT INTO smtp_send_events (server, email, subject, status) VALUES ($1, $2, $3, $4)`,
+				"powermta", ev.Email, ev.Subject, ev.Status)
+		}
+
 	default:
 		return echo.NewHTTPError(http.StatusBadRequest, a.i18n.Ts("bounces.unknownService"))
 	}

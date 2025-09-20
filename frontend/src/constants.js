@@ -46,8 +46,20 @@ export const storeKeys = Object.freeze({
 
 export const timestamp = 'ddd D MMM YYYY, hh:mm A';
 
+// Read primary color from CSS variable to keep charts in sync with theme
+const getCssVar = (name) => {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+    return (v || '').trim();
+  } catch (e) {
+    return '';
+  }
+};
+
 export const colors = Object.freeze({
-  primary: '#0055d4',
+  get primary() {
+    return getCssVar('--color-primary') || '#1EADFA';
+  },
 });
 
 export const regDuration = '[0-9]+(ms|s|m|h|d)';

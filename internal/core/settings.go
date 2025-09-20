@@ -40,8 +40,14 @@ func (c *Core) UpdateSettings(s models.Settings) error {
 			c.i18n.Ts("settings.errorEncoding", "error", err.Error()))
 	}
 
-	// Update the settings in the DB.
+	// Update existing settings keys in the DB.
 	if _, err := c.q.UpdateSettings.Exec(b); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError,
+			c.i18n.Ts("globals.messages.errorUpdating", "name", "{globals.terms.settings}", "error", pqErrMsg(err)))
+	}
+
+	// Insert any missing keys (eg: newly added settings) so they persist.
+	if _, err := c.q.UpsertSettings.Exec(b); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError,
 			c.i18n.Ts("globals.messages.errorUpdating", "name", "{globals.terms.settings}", "error", pqErrMsg(err)))
 	}

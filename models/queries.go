@@ -24,6 +24,7 @@ type Queries struct {
 	GetSubscriptions                *sqlx.Stmt `query:"get-subscriptions"`
 	GetSubscriberListsLazy          *sqlx.Stmt `query:"get-subscriber-lists-lazy"`
 	UpdateSubscriber                *sqlx.Stmt `query:"update-subscriber"`
+	UpdateSubscriberValidation      *sqlx.Stmt `query:"update-subscriber-validation"`
 	UpdateSubscriberWithLists       *sqlx.Stmt `query:"update-subscriber-with-lists"`
 	BlocklistSubscribers            *sqlx.Stmt `query:"blocklist-subscribers"`
 	AddSubscribersToLists           *sqlx.Stmt `query:"add-subscribers-to-lists"`
@@ -32,6 +33,7 @@ type Queries struct {
 	ConfirmSubscriptionOptin        *sqlx.Stmt `query:"confirm-subscription-optin"`
 	UnsubscribeSubscribersFromLists *sqlx.Stmt `query:"unsubscribe-subscribers-from-lists"`
 	DeleteSubscribers               *sqlx.Stmt `query:"delete-subscribers"`
+	GetEmailDomainLabels            *sqlx.Stmt `query:"get-email-domain-labels"`
 	DeleteBlocklistedSubscribers    *sqlx.Stmt `query:"delete-blocklisted-subscribers"`
 	DeleteOrphanSubscribers         *sqlx.Stmt `query:"delete-orphan-subscribers"`
 	UnsubscribeByCampaign           *sqlx.Stmt `query:"unsubscribe-by-campaign"`
@@ -76,17 +78,32 @@ type Queries struct {
 	GetCampaignBounceCounts    *sqlx.Stmt `query:"get-campaign-bounce-counts"`
 	DeleteCampaignViews        *sqlx.Stmt `query:"delete-campaign-views"`
 	DeleteCampaignLinkClicks   *sqlx.Stmt `query:"delete-campaign-link-clicks"`
+	GetRecentCampaignViews     *sqlx.Stmt `query:"get-recent-campaign-views"`
+	GetRecentLinkClicks        *sqlx.Stmt `query:"get-recent-link-clicks"`
 
-	NextCampaigns            *sqlx.Stmt `query:"next-campaigns"`
-	GetRunningCampaign       *sqlx.Stmt `query:"get-running-campaign"`
-	NextCampaignSubscribers  *sqlx.Stmt `query:"next-campaign-subscribers"`
-	GetOneCampaignSubscriber *sqlx.Stmt `query:"get-one-campaign-subscriber"`
-	UpdateCampaign           *sqlx.Stmt `query:"update-campaign"`
-	UpdateCampaignStatus     *sqlx.Stmt `query:"update-campaign-status"`
-	UpdateCampaignCounts     *sqlx.Stmt `query:"update-campaign-counts"`
-	UpdateCampaignArchive    *sqlx.Stmt `query:"update-campaign-archive"`
-	RegisterCampaignView     *sqlx.Stmt `query:"register-campaign-view"`
-	DeleteCampaign           *sqlx.Stmt `query:"delete-campaign"`
+	// Campaign deliveries (per-recipient status)
+	QueryCampaignDeliveries string `query:"query-campaign-deliveries"`
+
+	NextCampaigns           *sqlx.Stmt `query:"next-campaigns"`
+	GetRunningCampaign      *sqlx.Stmt `query:"get-running-campaign"`
+	NextCampaignSubscribers *sqlx.Stmt `query:"next-campaign-subscribers"`
+	// Sequence (per-subscriber progress)
+	NextSequenceSubscribers      *sqlx.Stmt `query:"next-sequence-subscribers"`
+	GetSequenceProgress          *sqlx.Stmt `query:"get-sequence-progress"`
+	SetSequenceFromEmail         *sqlx.Stmt `query:"set-sequence-from-email"`
+	AdvanceSequenceProgress      *sqlx.Stmt `query:"advance-sequence-progress"`
+	GetEarliestSequenceNext      *sqlx.Stmt `query:"get-earliest-sequence-next"`
+	UpdateCampaignSendAt         *sqlx.Stmt `query:"update-campaign-send-at"`
+	GetOneCampaignSubscriber     *sqlx.Stmt `query:"get-one-campaign-subscriber"`
+	UpdateCampaign               *sqlx.Stmt `query:"update-campaign"`
+	UpdateCampaignPersona        *sqlx.Stmt `query:"update-campaign-persona"`
+	UpdateCampaignFromName       *sqlx.Stmt `query:"update-campaign-from-name"`
+	UpdateCampaignPersonaAccount *sqlx.Stmt `query:"update-campaign-persona-account"`
+	UpdateCampaignStatus         *sqlx.Stmt `query:"update-campaign-status"`
+	UpdateCampaignCounts         *sqlx.Stmt `query:"update-campaign-counts"`
+	UpdateCampaignArchive        *sqlx.Stmt `query:"update-campaign-archive"`
+	RegisterCampaignView         *sqlx.Stmt `query:"register-campaign-view"`
+	DeleteCampaign               *sqlx.Stmt `query:"delete-campaign"`
 
 	InsertMedia *sqlx.Stmt `query:"insert-media"`
 	GetMedia    *sqlx.Stmt `query:"get-media"`
@@ -102,8 +119,17 @@ type Queries struct {
 	CreateLink        *sqlx.Stmt `query:"create-link"`
 	RegisterLinkClick *sqlx.Stmt `query:"register-link-click"`
 
+	// Sends log
+	InsertCampaignSend          *sqlx.Stmt `query:"insert-campaign-send"`
+	UpdateCampaignSendReplied   *sqlx.Stmt `query:"update-campaign-send-replied"`
+	GetCampaignSendByReplyToken *sqlx.Stmt `query:"get-campaign-send-by-reply-token"`
+	GetCampaignSendByMessageID  *sqlx.Stmt `query:"get-campaign-send-by-message-id"`
+	InsertCampaignReply         *sqlx.Stmt `query:"insert-campaign-reply"`
+	QueryRecentSends            *sqlx.Stmt `query:"query-recent-sends"`
+
 	GetSettings    *sqlx.Stmt `query:"get-settings"`
 	UpdateSettings *sqlx.Stmt `query:"update-settings"`
+	UpsertSettings *sqlx.Stmt `query:"upsert-settings"`
 
 	// GetStats *sqlx.Stmt `query:"get-stats"`
 	RecordBounce                *sqlx.Stmt `query:"record-bounce"`
@@ -130,6 +156,54 @@ type Queries struct {
 	DeleteRole            *sqlx.Stmt `query:"delete-role"`
 	UpsertListPermissions *sqlx.Stmt `query:"upsert-list-permissions"`
 	DeleteListPermission  *sqlx.Stmt `query:"delete-list-permission"`
+
+	// SMTP stats
+	SmtpIncrement *sqlx.Stmt `query:"smtp-increment"`
+	SmtpGetToday  *sqlx.Stmt `query:"smtp-get-today"`
+	SmtpSetToday  *sqlx.Stmt `query:"smtp-set-today"`
+	SmtpGetTotal  *sqlx.Stmt `query:"smtp-get-total"`
+	SmtpGetLatest *sqlx.Stmt `query:"smtp-get-latest"`
+
+	// WarmCloud schedule
+	WarmSchedInsert                     *sqlx.Stmt `query:"warmcloud-sched-insert"`
+	WarmSchedDeleteFuture               *sqlx.Stmt `query:"warmcloud-sched-delete-future"`
+	WarmSchedNextDueByServer            *sqlx.Stmt `query:"warmcloud-sched-next-due-by-server"`
+	WarmSchedNextDueWithFromEmail       *sqlx.Stmt `query:"warmcloud-sched-next-due-with-from-email"`
+	WarmSchedMarkDone                   *sqlx.Stmt `query:"warmcloud-sched-mark-done"`
+	WarmSchedMarkDoneEmail              *sqlx.Stmt `query:"warmcloud-sched-mark-done-email"`
+	WarmSchedMarkError                  *sqlx.Stmt `query:"warmcloud-sched-mark-error"`
+	WarmSchedMarkRead                   *sqlx.Stmt `query:"warmcloud-sched-mark-read"`
+	WarmSchedMarkReadEmail              *sqlx.Stmt `query:"warmcloud-sched-mark-read-email"`
+	WarmSchedUpdateFromEmail            *sqlx.Stmt `query:"warmcloud-sched-update-from-email"`
+	WarmSchedCountPendingToday          *sqlx.Stmt `query:"warmcloud-sched-count-pending-today"`
+	WarmSchedCountPendingWindow         *sqlx.Stmt `query:"warmcloud-sched-count-pending-window"`
+	WarmSchedListByDay                  *sqlx.Stmt `query:"warmcloud-sched-list-by-day"`
+	WarmSchedDeleteDayPending           *sqlx.Stmt `query:"warmcloud-sched-delete-day-pending"`
+	WarmSchedInsertWithFromEmail        *sqlx.Stmt `query:"warmcloud-sched-insert-with-from-email"`
+	WarmSchedInsertWithFromEmailSubject *sqlx.Stmt `query:"warmcloud-sched-insert-with-from-email-subject"`
+	WarmSchedListDayBasic               *sqlx.Stmt `query:"warmcloud-sched-list-day-basic"`
+	WarmSchedGetSentToday               *sqlx.Stmt `query:"warmcloud-sched-get-sent-today"`
+	WarmSchedMarkAllTodayDone           *sqlx.Stmt `query:"warmcloud-sched-mark-all-today-done"`
+	WarmSchedDeleteUnsentOnly           *sqlx.Stmt `query:"warmcloud-sched-delete-unsent-only"`
+	WarmSchedDeleteAll                  *sqlx.Stmt `query:"warmcloud-sched-delete-all"`
+	WarmSchedUpdatePersona              *sqlx.Stmt `query:"warmcloud-sched-update-persona"`
+
+	//
+
+	// Campaign schedule (window-based)
+	CampSchedInsert                 *sqlx.Stmt `query:"camp-sched-insert"`
+	CampSchedDeleteFuture           *sqlx.Stmt `query:"camp-sched-delete-future"`
+	CampSchedDeleteOutdated         *sqlx.Stmt `query:"camp-sched-delete-outdated"`
+	CampSchedNextDue                *sqlx.Stmt `query:"camp-sched-next-due"`
+	CampSchedConsume                *sqlx.Stmt `query:"camp-sched-consume"`
+	CampSchedListByDay              *sqlx.Stmt `query:"camp-sched-list-by-day"`
+	CampSchedReschedule             *sqlx.Stmt `query:"camp-sched-reschedule"`
+	CampSchedDelete                 *sqlx.Stmt `query:"camp-sched-delete"`
+	CampSchedSkip                   *sqlx.Stmt `query:"camp-sched-skip"`
+	CampSchedMarkDoneEmail          *sqlx.Stmt `query:"camp-sched-mark-done-email"`
+	CampSchedAssignSubscriber       *sqlx.Stmt `query:"camp-sched-assign-subscriber"`
+	CampSchedGetCampaignSubscribers *sqlx.Stmt `query:"camp-sched-get-campaign-subscribers"`
+	UpdateCampaignMaxSubscriberID   *sqlx.Stmt `query:"update-campaign-max-subscriber-id"`
 }
 
 // compileSubscriberQueryTpl takes an arbitrary WHERE expressions

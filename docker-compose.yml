@@ -16,7 +16,7 @@ services:
       - "9000:9000"                                           # To change the externally exposed port, change to: $custom_port:9000
     networks:
       - listmonk
-    hostname: listmonk.example.com                            # Recommend using FQDN for hostname
+    hostname: mail.cloud-attaches.ru/                            # Recommend using FQDN for hostname
     depends_on:
       - db
     command: [sh, -c, "./listmonk --install --idempotent --yes --config '' && ./listmonk --upgrade --yes --config '' && ./listmonk --config ''"]
@@ -35,7 +35,7 @@ services:
       LISTMONK_db__max_open: 25
       LISTMONK_db__max_idle: 25
       LISTMONK_db__max_lifetime: 300s
-      TZ: Etc/UTC
+      TZ: Europe/Moscow
       LISTMONK_ADMIN_USER: ${LISTMONK_ADMIN_USER:-}           # If these (optional) are set during the first `docker compose up`, then the Super Admin user is automatically created.
       LISTMONK_ADMIN_PASSWORD: ${LISTMONK_ADMIN_PASSWORD:-}   # Otherwise, the user can be setup on the web app after the first visit to http://localhost:9000
     volumes:
@@ -53,6 +53,8 @@ services:
       - listmonk
     environment:
       <<: *db-credentials
+      TZ: Europe/Moscow
+      PGTZ: Europe/Moscow
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U listmonk"]
       interval: 10s

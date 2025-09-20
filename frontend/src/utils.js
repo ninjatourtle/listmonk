@@ -210,7 +210,7 @@ export default class Utils {
       return obj.map((o) => this.camelKeys(o, testFunc, `${keys || ''}.*`));
     }
 
-    if (obj.constructor === Object) {
+    if (obj && obj.constructor === Object) {
       return Object.keys(obj).reduce((result, key) => {
         const keyPath = `${keys || ''}.${key}`;
         let k = key;

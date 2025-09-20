@@ -1,6 +1,12 @@
 package models
 
-import "gopkg.in/volatiletech/null.v6"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"gopkg.in/volatiletech/null.v6"
+)
 
 // Settings represents the app settings stored in the DB.
 type Settings struct {
@@ -16,6 +22,9 @@ type Settings struct {
 	SendOptinConfirmation         bool     `json:"app.send_optin_confirmation"`
 	CheckUpdates                  bool     `json:"app.check_updates"`
 	AppLang                       string   `json:"app.lang"`
+
+	ReplyEnabled bool   `json:"reply.enabled"`
+	ReplyDomain  string `json:"reply.domain"`
 
 	AppBatchSize             int    `json:"app.batch_size"`
 	AppConcurrency           int    `json:"app.concurrency"`
@@ -96,6 +105,26 @@ type Settings struct {
 		TLSSkipVerify bool                `json:"tls_skip_verify"`
 		DailyLimit    int                 `json:"daily_limit"`
 		SendPause     string              `json:"send_pause"`
+
+		// WarmCloud API settings
+		WarmCloudEnabled      bool   `json:"warmcloud_enabled"`
+		WarmCloudToken        string `json:"warmcloud_token,omitempty"`
+		WarmCloudUserID       int    `json:"warmcloud_user_id"`
+		WarmCloudRefID        string `json:"warmcloud_ref_id"`
+		WarmCloudBig          string `json:"warmcloud_big"`
+		WarmCloudDailyLimit   int    `json:"warmcloud_daily_limit"`
+		WarmCloudDailyStep    int    `json:"warmcloud_daily_step"`
+		WarmCloudCampaignID   int    `json:"warmcloud_campaign_id"`
+		WarmCloudReadPercent  int    `json:"warmcloud_read_percent"`
+		WarmCloudMaxPerTick   int    `json:"warmcloud_max_per_tick"`
+		WarmCloudSleepBetween string `json:"warmcloud_sleep_between"`
+		// Rate limiting: send N emails per M minutes (jitter optional)
+		WarmCloudRateCount         int `json:"warmcloud_rate_count"`
+		WarmCloudRateWindowMinutes int `json:"warmcloud_rate_window_minutes"`
+		WarmCloudRateJitterPct     int `json:"warmcloud_rate_jitter_pct"`
+		// Per-server working hours override
+		WarmCloudWorkingHoursEnabled bool   `json:"warmcloud_working_hours_enabled"`
+		WarmCloudWorkingHours        string `json:"warmcloud_working_hours"`
 	} `json:"smtp"`
 
 	Messengers []struct {
@@ -128,6 +157,11 @@ type Settings struct {
 		Enabled bool   `json:"enabled"`
 		Key     string `json:"key"`
 	} `json:"bounce.forwardemail"`
+
+	BouncePowermta struct {
+		Enabled bool   `json:"enabled"`
+		Key     string `json:"key"`
+	} `json:"bounce.powermta"`
 	BounceBoxes []struct {
 		UUID          string `json:"uuid"`
 		Enabled       bool   `json:"enabled"`
@@ -147,4 +181,104 @@ type Settings struct {
 	AdminCustomJS   string `json:"appearance.admin.custom_js"`
 	PublicCustomCSS string `json:"appearance.public.custom_css"`
 	PublicCustomJS  string `json:"appearance.public.custom_js"`
+
+	// Global WarmCloud settings
+	WarmCloudGlobalEnabled           bool   `json:"warmcloud.global_enabled"`
+	WarmCloudGlobalToken             string `json:"warmcloud.global_token,omitempty"`
+	WarmCloudGlobalUserID            int    `json:"warmcloud.global_user_id"`
+	WarmCloudGlobalRefID             string `json:"warmcloud.global_ref_id"`
+	WarmCloudGlobalBig               string `json:"warmcloud.global_big"`
+	WarmCloudGlobalDefaultLimit      int    `json:"warmcloud.global_default_limit"`
+	WarmCloudGlobalDefaultStep       int    `json:"warmcloud.global_default_step"`
+	WarmCloudGlobalDefaultCampaignID int    `json:"warmcloud.global_default_campaign_id"`
+	WarmCloudGlobalWorkingHours      string `json:"warmcloud.global_working_hours"`
+	WarmCloudGlobalReadPercent       int    `json:"warmcloud.global_read_percent"`
+	WarmCloudGlobalMaxPerTick        int    `json:"warmcloud.global_max_per_tick"`
+	WarmCloudGlobalSleepBetween      string `json:"warmcloud.global_sleep_between"`
+
+	// Personas (aka identities) grouped by domain.
+	Personas []Persona `json:"personas"`
+}
+
+// Persona represents a domain-scoped identity with sender accounts and a
+// persona-level suppression list.
+type Persona struct {
+	// Domain that defines the persona, eg: example.com
+	Domain string `json:"domain"`
+	// Optional display name/label for the persona.
+	Label string `json:"label"`
+	// SMTP servers (settings.smtp[i].name) this persona can use.
+	SMTP []string `json:"smtp"`
+	// Accounts (local parts) with optional IMAP tracking configuration.
+	Accounts PersonaAccounts `json:"accounts"`
+	// Suppressions are full email addresses to never send to when using this persona/domain.
+	Suppressions []string `json:"suppressions"`
+}
+
+// PersonaAccount represents a single sender local-part and optional IMAP tracking config.
+type PersonaAccount struct {
+	// Local part before @domain (eg: noreply)
+	Name string `json:"name"`
+
+	// IMAP tracking configuration
+	IMAPEnabled       bool   `json:"imap_enabled"`
+	IMAPHost          string `json:"imap_host"`
+	IMAPPort          int    `json:"imap_port"`
+	IMAPUsername      string `json:"imap_username"`
+	IMAPPassword      string `json:"imap_password,omitempty"`
+	IMAPTLS           bool   `json:"imap_tls"`
+	IMAPFolder        string `json:"imap_folder"`
+	IMAPCheckInterval string `json:"imap_check_interval"`
+
+	// POP3 reply tracking configuration (receive replies on sender mailbox)
+	POPEnabled       bool   `json:"pop_enabled"`
+	POPHost          string `json:"pop_host"`
+	POPPort          int    `json:"pop_port"`
+	POPUsername      string `json:"pop_username"`
+	POPPassword      string `json:"pop_password,omitempty"`
+	POPTLSEnabled    bool   `json:"pop_tls_enabled"`
+	POPTLSSkipVerify bool   `json:"pop_tls_skip_verify"`
+	POPCheckInterval string `json:"pop_check_interval"`
+}
+
+// PersonaAccounts is a helper type that accepts either an array of strings
+// (legacy format) or an array of PersonaAccount objects.
+type PersonaAccounts []PersonaAccount
+
+func (pa *PersonaAccounts) UnmarshalJSON(b []byte) error {
+	// Try the new format first: []PersonaAccount
+	var objs []PersonaAccount
+	if err := json.Unmarshal(b, &objs); err == nil {
+		*pa = objs
+		return nil
+	}
+
+	// Fallback to legacy []string
+	var strs []string
+	if err := json.Unmarshal(b, &strs); err == nil {
+		out := make([]PersonaAccount, 0, len(strs))
+		for _, s := range strs {
+			name := strings.ToLower(strings.TrimSpace(s))
+			if name == "" {
+				continue
+			}
+			out = append(out, PersonaAccount{Name: name})
+		}
+		*pa = out
+		return nil
+	}
+
+	// Single string?
+	var single string
+	if err := json.Unmarshal(b, &single); err == nil {
+		name := strings.ToLower(strings.TrimSpace(single))
+		if name == "" {
+			*pa = []PersonaAccount{}
+		} else {
+			*pa = []PersonaAccount{{Name: name}}
+		}
+		return nil
+	}
+
+	return fmt.Errorf("invalid persona accounts format")
 }

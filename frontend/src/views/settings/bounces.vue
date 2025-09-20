@@ -112,6 +112,21 @@
             </b-field>
           </div>
         </div>
+
+        <!-- PowerMTA -->
+        <div class="columns">
+          <div class="column is-3">
+            <b-field :label="$t('settings.bounces.enablePowermta')">
+              <b-switch v-model="data['bounce.powermta'].enabled" name="powermta_enabled" :native-value="true" />
+            </b-field>
+          </div>
+          <div class="column">
+            <b-field :label="$t('settings.bounces.powermtaKey')" :message="$t('globals.messages.passwordChange')">
+              <b-input v-model="data['bounce.powermta'].key" type="password"
+                       :disabled="!data['bounce.powermta'].enabled" name="powermta_key" />
+            </b-field>
+          </div>
+        </div>
       </div>
     </div>
 

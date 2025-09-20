@@ -3,7 +3,7 @@ DROP TYPE IF EXISTS list_optin CASCADE; CREATE TYPE list_optin AS ENUM ('single'
 DROP TYPE IF EXISTS subscriber_status CASCADE; CREATE TYPE subscriber_status AS ENUM ('enabled', 'disabled', 'blocklisted');
 DROP TYPE IF EXISTS subscription_status CASCADE; CREATE TYPE subscription_status AS ENUM ('unconfirmed', 'confirmed', 'unsubscribed');
 DROP TYPE IF EXISTS campaign_status CASCADE; CREATE TYPE campaign_status AS ENUM ('draft', 'running', 'scheduled', 'paused', 'cancelled', 'finished');
-DROP TYPE IF EXISTS campaign_type CASCADE; CREATE TYPE campaign_type AS ENUM ('regular', 'optin');
+DROP TYPE IF EXISTS campaign_type CASCADE; CREATE TYPE campaign_type AS ENUM ('regular', 'optin', 'sequence');
 DROP TYPE IF EXISTS content_type CASCADE; CREATE TYPE content_type AS ENUM ('richtext', 'html', 'plain', 'markdown', 'visual');
 DROP TYPE IF EXISTS bounce_type CASCADE; CREATE TYPE bounce_type AS ENUM ('soft', 'hard', 'complaint');
 DROP TYPE IF EXISTS template_type CASCADE; CREATE TYPE template_type AS ENUM ('campaign', 'campaign_visual', 'tx');
@@ -23,6 +23,12 @@ CREATE TABLE subscribers (
     attribs         JSONB NOT NULL DEFAULT '{}',
     status          subscriber_status NOT NULL DEFAULT 'enabled',
 
+    -- Email validation fields
+    validation_status   TEXT NULL,
+    validation_reason   TEXT NULL,
+    validated_at        TIMESTAMP WITH TIME ZONE NULL,
+    email_type          TEXT NULL,
+
     created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -31,6 +37,19 @@ DROP INDEX IF EXISTS idx_subs_status; CREATE INDEX idx_subs_status ON subscriber
 DROP INDEX IF EXISTS idx_subs_id_status; CREATE INDEX idx_subs_id_status ON subscribers(id, status);
 DROP INDEX IF EXISTS idx_subs_created_at; CREATE INDEX idx_subs_created_at ON subscribers(created_at);
 DROP INDEX IF EXISTS idx_subs_updated_at; CREATE INDEX idx_subs_updated_at ON subscribers(updated_at);
+DROP INDEX IF EXISTS idx_subs_validated_at; CREATE INDEX idx_subs_validated_at ON subscribers(validated_at);
+
+-- Email classification labels (DB-driven)
+DROP TABLE IF EXISTS email_domain_labels CASCADE;
+CREATE TABLE email_domain_labels (
+    domain          TEXT PRIMARY KEY,
+    label           TEXT NOT NULL, -- eg: personal, role, free, business, disposable, public, private
+    disposable      BOOLEAN NOT NULL DEFAULT FALSE,
+    free            BOOLEAN NOT NULL DEFAULT FALSE,
+    public_private  TEXT NULL,     -- optional: public|private
+    updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+DROP INDEX IF EXISTS idx_email_domain_labels_label; CREATE INDEX idx_email_domain_labels_label ON email_domain_labels(label);
 
 -- lists
 DROP TABLE IF EXISTS lists CASCADE;
@@ -94,6 +113,10 @@ CREATE TABLE campaigns (
     name             TEXT NOT NULL,
     subject          TEXT NOT NULL,
     from_email       TEXT NOT NULL,
+    from_name        TEXT NULL,
+    -- Optional persona domain to rotate sender accounts from settings.personas
+    persona_domain   TEXT NULL,
+    persona_account  TEXT NULL,
     body             TEXT NOT NULL,
     body_source      TEXT NULL,
     altbody          TEXT NULL,
@@ -123,6 +146,13 @@ CREATE TABLE campaigns (
     archive_template_id INTEGER REFERENCES templates(id) ON DELETE SET NULL,
     archive_meta        JSONB NOT NULL DEFAULT '{}',
 
+    -- Sequence (drip) steps stored inline for type='sequence'
+    sequence            JSONB NOT NULL DEFAULT '[]',
+
+    -- Per-campaign rate limiting: N messages per M minutes
+    rate_window_count   INT NOT NULL DEFAULT 0,
+    rate_window_minutes INT NOT NULL DEFAULT 0,
+
     started_at       TIMESTAMP WITH TIME ZONE,
     created_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -146,6 +176,66 @@ CREATE TABLE campaign_lists (
 CREATE UNIQUE INDEX ON campaign_lists (campaign_id, list_id);
 DROP INDEX IF EXISTS idx_camp_lists_camp_id; CREATE INDEX idx_camp_lists_camp_id ON campaign_lists(campaign_id);
 DROP INDEX IF EXISTS idx_camp_lists_list_id; CREATE INDEX idx_camp_lists_list_id ON campaign_lists(list_id);
+
+-- Campaign send schedule (window-based per campaign)
+DROP TABLE IF EXISTS campaign_schedule CASCADE;
+CREATE TABLE campaign_schedule (
+    id           BIGSERIAL PRIMARY KEY,
+    campaign_id  INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    due_at       TIMESTAMP WITH TIME ZONE NOT NULL,
+    quota        INT NOT NULL DEFAULT 0,
+    used         INT NOT NULL DEFAULT 0,
+    status       TEXT NOT NULL DEFAULT 'pending', -- pending|done|error
+    error        TEXT NULL,
+    -- Pre-assigned recipient information
+    subscriber_id INTEGER NULL REFERENCES subscribers(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    email_to     TEXT NULL,
+    email_from   TEXT NULL,
+    subject      TEXT NULL,
+    created_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at   TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX idx_camp_sched_camp_due ON campaign_schedule(campaign_id, due_at);
+CREATE INDEX idx_camp_sched_status ON campaign_schedule(status);
+
+DROP TABLE IF EXISTS campaign_sends CASCADE;
+CREATE TABLE campaign_sends (
+    id            BIGSERIAL PRIMARY KEY,
+    campaign_id   INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    subscriber_id INTEGER NOT NULL REFERENCES subscribers(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    step          INTEGER NULL,
+    subject       TEXT NOT NULL DEFAULT '',
+    from_email    TEXT NOT NULL DEFAULT '',
+    success       BOOLEAN NOT NULL DEFAULT true,
+    error         TEXT NULL,
+    reply_token   TEXT NOT NULL DEFAULT '',
+    message_id    TEXT NOT NULL DEFAULT '',
+    reply_at      TIMESTAMP WITH TIME ZONE NULL,
+    created_at    TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_sends_created_at ON campaign_sends(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_campaign_sends_campaign_id ON campaign_sends(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_sends_reply_token ON campaign_sends(reply_token);
+CREATE INDEX IF NOT EXISTS idx_campaign_sends_message_id ON campaign_sends(message_id);
+
+DROP TABLE IF EXISTS campaign_replies CASCADE;
+CREATE TABLE campaign_replies (
+    id            BIGSERIAL PRIMARY KEY,
+    campaign_id   INTEGER NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    subscriber_id INTEGER NULL REFERENCES subscribers(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    send_id       BIGINT NULL REFERENCES campaign_sends(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    email         TEXT NOT NULL,
+    reply_token   TEXT NULL,
+    message_id    TEXT NULL,
+    in_reply_to   TEXT NULL,
+    subject       TEXT NOT NULL DEFAULT '',
+    snippet       TEXT NOT NULL DEFAULT '',
+    headers       JSONB NOT NULL DEFAULT '{}',
+    created_at    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_replies_campaign ON campaign_replies(campaign_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_campaign_replies_token ON campaign_replies(reply_token);
+CREATE INDEX IF NOT EXISTS idx_campaign_replies_message_id ON campaign_replies(message_id);
 
 DROP TABLE IF EXISTS campaign_views CASCADE;
 CREATE TABLE campaign_views (
@@ -243,6 +333,8 @@ INSERT INTO settings (key, value) VALUES
     ('app.check_updates', 'true'),
     ('app.notify_emails', '[]'),
     ('app.lang', '"en"'),
+    ('reply.enabled', 'false'),
+    ('reply.domain', '""'),
     ('privacy.individual_tracking', 'false'),
     ('privacy.unsubscribe_header', 'true'),
     ('privacy.allow_blocklist', 'true'),
@@ -282,12 +374,22 @@ INSERT INTO settings (key, value) VALUES
     ('bounce.sendgrid_key', '""'),
     ('bounce.postmark', '{"enabled": false, "username": "", "password": ""}'),
     ('bounce.forwardemail', '{"enabled": false, "key": ""}'),
+    ('bounce.powermta', '{"enabled": false, "key": ""}'),
     ('bounce.mailboxes',
         '[{"enabled":false, "type": "pop", "host":"pop.yoursite.com","port":995,"auth_protocol":"userpass","username":"username","password":"password","return_path": "bounce@listmonk.yoursite.com","scan_interval":"15m","tls_enabled":true,"tls_skip_verify":false}]'),
     ('appearance.admin.custom_css', '""'),
     ('appearance.admin.custom_js', '""'),
     ('appearance.public.custom_css', '""'),
     ('appearance.public.custom_js', '""');
+
+-- smtp stats (per server per day)
+DROP TABLE IF EXISTS smtp_stats;
+CREATE TABLE smtp_stats (
+    name TEXT NOT NULL,
+    day  DATE NOT NULL,
+    sent BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY(name, day)
+);
 
 -- bounces
 DROP TABLE IF EXISTS bounces CASCADE;
@@ -388,37 +490,82 @@ DROP INDEX IF EXISTS mat_dashboard_stats_idx; CREATE UNIQUE INDEX mat_dashboard_
 
 DROP MATERIALIZED VIEW IF EXISTS mat_dashboard_charts;
 CREATE MATERIALIZED VIEW mat_dashboard_charts AS
-    WITH clicks AS (
-        SELECT JSON_AGG(ROW_TO_JSON(row))
-        FROM (
-            WITH viewDates AS (
-              SELECT TIMEZONE('UTC', created_at)::DATE AS to_date,
-                     TIMEZONE('UTC', created_at)::DATE - INTERVAL '30 DAY' AS from_date
-                     FROM link_clicks ORDER BY id DESC LIMIT 1
-            )
-            SELECT COUNT(*) AS count, created_at::DATE as date FROM link_clicks
-              -- use > between < to force the use of the date index.
-              WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (SELECT from_date FROM viewDates) AND (SELECT to_date FROM viewDates)
-              GROUP by date ORDER BY date
-        ) row
+    WITH
+    click_bounds AS (
+        SELECT COALESCE(MAX(TIMEZONE('UTC', created_at)::DATE), CURRENT_DATE) AS to_date
+        FROM link_clicks
+    ),
+    click_rows AS (
+        SELECT COUNT(*) AS count, TIMEZONE('UTC', created_at)::DATE AS date
+        FROM link_clicks, click_bounds
+        WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (click_bounds.to_date - INTERVAL '30 DAY') AND click_bounds.to_date
+        GROUP BY date
+        ORDER BY date
+    ),
+    clicks AS (
+        SELECT COALESCE(JSON_AGG(ROW_TO_JSON(click_rows)), '[]'::JSON) AS data FROM click_rows
+    ),
+    view_bounds AS (
+        SELECT COALESCE(MAX(TIMEZONE('UTC', created_at)::DATE), CURRENT_DATE) AS to_date
+        FROM campaign_views
+    ),
+    view_rows AS (
+        SELECT COUNT(*) AS count, TIMEZONE('UTC', created_at)::DATE AS date
+        FROM campaign_views, view_bounds
+        WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (view_bounds.to_date - INTERVAL '30 DAY') AND view_bounds.to_date
+        GROUP BY date
+        ORDER BY date
     ),
     views AS (
-        SELECT JSON_AGG(ROW_TO_JSON(row))
-        FROM (
-            WITH viewDates AS (
-              SELECT TIMEZONE('UTC', created_at)::DATE AS to_date,
-                     TIMEZONE('UTC', created_at)::DATE - INTERVAL '30 DAY' AS from_date
-                     FROM campaign_views ORDER BY id DESC LIMIT 1
-            )
-            SELECT COUNT(*) AS count, created_at::DATE as date FROM campaign_views
-              -- use > between < to force the use of the date index.
-              WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (SELECT from_date FROM viewDates) AND (SELECT to_date FROM viewDates)
-              GROUP by date ORDER BY date
-        ) row
+        SELECT COALESCE(JSON_AGG(ROW_TO_JSON(view_rows)), '[]'::JSON) AS data FROM view_rows
+    ),
+    send_bounds AS (
+        SELECT COALESCE(MAX(TIMEZONE('UTC', created_at)::DATE), CURRENT_DATE) AS to_date
+        FROM campaign_sends
+    ),
+    send_rows AS (
+        SELECT COUNT(*) AS count, TIMEZONE('UTC', created_at)::DATE AS date
+        FROM campaign_sends, send_bounds
+        WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (send_bounds.to_date - INTERVAL '30 DAY') AND send_bounds.to_date
+        GROUP BY date
+        ORDER BY date
+    ),
+    sends AS (
+        SELECT COALESCE(JSON_AGG(ROW_TO_JSON(send_rows)), '[]'::JSON) AS data FROM send_rows
+    ),
+    reply_rows AS (
+        SELECT COUNT(*) AS count, TIMEZONE('UTC', reply_at)::DATE AS date
+        FROM campaign_sends, send_bounds
+        WHERE reply_at IS NOT NULL
+          AND TIMEZONE('UTC', reply_at)::DATE BETWEEN (send_bounds.to_date - INTERVAL '30 DAY') AND send_bounds.to_date
+        GROUP BY date
+        ORDER BY date
+    ),
+    replies AS (
+        SELECT COALESCE(JSON_AGG(ROW_TO_JSON(reply_rows)), '[]'::JSON) AS data FROM reply_rows
+    ),
+    bounce_bounds AS (
+        SELECT COALESCE(MAX(TIMEZONE('UTC', created_at)::DATE), CURRENT_DATE) AS to_date
+        FROM bounces
+    ),
+    bounce_rows AS (
+        SELECT COUNT(*) AS count, TIMEZONE('UTC', created_at)::DATE AS date
+        FROM bounces, bounce_bounds
+        WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (bounce_bounds.to_date - INTERVAL '30 DAY') AND bounce_bounds.to_date
+        GROUP BY date
+        ORDER BY date
+    ),
+    bounces AS (
+        SELECT COALESCE(JSON_AGG(ROW_TO_JSON(bounce_rows)), '[]'::JSON) AS data FROM bounce_rows
     )
-    SELECT NOW() AS updated_at, JSON_BUILD_OBJECT('link_clicks', COALESCE((SELECT * FROM clicks), '[]'),
-                                  'campaign_views', COALESCE((SELECT * FROM views), '[]')
-                                ) AS data;
+    SELECT NOW() AS updated_at,
+           JSON_BUILD_OBJECT(
+               'link_clicks', (SELECT data FROM clicks),
+               'campaign_views', (SELECT data FROM views),
+               'campaign_sends', (SELECT data FROM sends),
+               'campaign_replies', (SELECT data FROM replies),
+               'campaign_bounces', (SELECT data FROM bounces)
+           ) AS data;
 DROP INDEX IF EXISTS mat_dashboard_charts_idx; CREATE UNIQUE INDEX mat_dashboard_charts_idx ON mat_dashboard_charts (updated_at);
 
 -- subscriber counts stats for lists

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"math/rand"
 	"net/textproto"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/Masterminds/sprig/v3"
 	"github.com/knadh/listmonk/internal/i18n"
+	"github.com/knadh/listmonk/internal/messenger/email"
 	"github.com/knadh/listmonk/internal/notifs"
 	"github.com/knadh/listmonk/models"
 	"golang.org/x/text/cases"
@@ -35,13 +37,37 @@ const (
 type Store interface {
 	NextCampaigns(currentIDs []int64, sentCounts []int64) ([]*models.Campaign, error)
 	NextSubscribers(campID, limit int) ([]models.Subscriber, error)
+	NextSequenceSubscribers(campID, limit int) ([]models.Subscriber, error)
 	GetCampaign(campID int) (*models.Campaign, error)
 	GetAttachment(mediaID int) (models.Attachment, error)
 	UpdateCampaignStatus(campID int, status string) error
 	UpdateCampaignCounts(campID int, toSend int, sent int, lastSubID int) error
+	GetSequenceProgress(campID int, subscriberID int) (int, time.Time, string, string, bool, error)
+	AdvanceSequenceProgress(campID int, subscriberID int, step int, nextAt *time.Time, done bool) error
+	SetSequenceFromEmail(campID int, subscriberID int, fromEmail string) error
+	GetEarliestSequenceNext(campID int) (*time.Time, error)
+	UpdateCampaignSendAt(campID int, t time.Time, status string) error
+	RecordSend(campID int, subscriberID int, step int, subject string, fromEmail string, success bool, errMsg string, replyToken string, messageID string) error
+	RecordImmediateBounce(sub models.Subscriber, camp *models.Campaign, smtpErr error) error
 	CreateLink(url string) (string, error)
 	BlocklistSubscriber(id int64) error
 	DeleteSubscriber(id int64) error
+
+	// Settings access for persona-based sending
+	GetSettings() (*models.Settings, error)
+
+	// Campaign schedule windows
+	CampSchedInsert(campID int, due time.Time, quota int) error
+	CampSchedInsertWithRecipient(campID int, due time.Time, quota int, subscriberID int, emailTo, emailFrom, subject string) error
+	CampSchedDeleteFuture(campID int) error
+	CampSchedDeleteOutdated(campID int) error
+	CampSchedNextDue(campID int) (int64, time.Time, int, int, int, string, string, string, bool, error) // id, due, quota, used, subscriber_id, email_to, email_from, subject
+	CampSchedConsume(id int64, n int) (int, int, string, error)                                         // quota, used, status
+	CampSchedMarkDoneEmail(id int64, to, from, subject string) error
+	AssignSlotSubscriber(id int64, subscriberID int, email string) error
+	GetCampaignSubscribers(campID, lastID, maxID int, campType string, limit int) ([]models.Subscriber, error)
+	GetSubscriberByID(id int) (models.Subscriber, error)
+	UpdateCampaignMaxSubscriberID(campID, maxSubID int) error
 }
 
 // Messenger is an interface for a generic messaging backend,
@@ -68,9 +94,16 @@ type Manager struct {
 	fnNotify   func(subject string, data any) error
 	log        *log.Logger
 
+	randMu sync.Mutex
+	rng    *rand.Rand
+
 	// Campaigns that are currently running.
 	pipes    map[int]*pipe
 	pipesMut sync.RWMutex
+
+	// Campaign scheduling locks to prevent concurrent slot seeding
+	schedLocks    map[int]*sync.Mutex
+	schedLocksMut sync.RWMutex
 
 	tpls    map[int]*models.Template
 	tplsMut sync.RWMutex
@@ -108,6 +141,13 @@ type CampaignMessage struct {
 	unsubURL string
 
 	pipe *pipe
+
+	// For sequence campaigns
+	StepIndex  int
+	NextStepAt *time.Time
+
+	// Optional: schedule slot id associated with this message
+	SlotID int64
 }
 
 // Config has parameters for configuring the manager.
@@ -167,16 +207,62 @@ func New(cfg Config, store Store, i *i18n.I18n, l *log.Logger) *Manager {
 		log:          l,
 		messengers:   make(map[string]Messenger),
 		pipes:        make(map[int]*pipe),
+		schedLocks:   make(map[int]*sync.Mutex),
 		tpls:         make(map[int]*models.Template),
 		links:        make(map[string]string),
 		nextPipes:    make(chan *pipe, 1000),
 		campMsgQ:     make(chan CampaignMessage, cfg.Concurrency*cfg.MessageRate*2),
 		msgQ:         make(chan models.Message, cfg.Concurrency*cfg.MessageRate*2),
 		slidingStart: time.Now(),
+		rng:          rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 	m.tplFuncs = m.makeGnericFuncMap()
 
 	return m
+}
+
+// getCampaignSchedLock returns a mutex for the given campaign ID to prevent concurrent slot seeding
+func (m *Manager) getCampaignSchedLock(campID int) *sync.Mutex {
+	m.schedLocksMut.Lock()
+	defer m.schedLocksMut.Unlock()
+
+	if lock, exists := m.schedLocks[campID]; exists {
+		return lock
+	}
+
+	lock := &sync.Mutex{}
+	m.schedLocks[campID] = lock
+	return lock
+}
+
+// computeNextSequenceTime determines the absolute time for the subscriber's next step
+// based on the current message's step and the campaign's sequence. Returns (nil, true)
+// if the sequence is complete for the subscriber.
+func computeNextSequenceTime(msg CampaignMessage) (*time.Time, bool) {
+	if msg.Campaign == nil || msg.Campaign.Type != models.CampaignTypeSequence {
+		return nil, true
+	}
+	// Parse sequence JSON.
+	seq, err := models.ParseSequence(msg.Campaign.Sequence)
+	if err != nil {
+		return nil, true
+	}
+	nextIdx := msg.StepIndex + 1
+	if nextIdx >= len(seq.Steps) {
+		return nil, true
+	}
+	st := seq.Steps[nextIdx]
+	// Compute delay in minutes
+	mult := 1
+	switch strings.ToLower(st.DelayUnit) {
+	case "hours":
+		mult = 60
+	case "days":
+		mult = 60 * 24
+	}
+	delayMins := st.DelayValue * mult
+	t := time.Now().Add(time.Duration(delayMins) * time.Minute)
+	return &t, false
 }
 
 // AddMessenger adds a Messenger messaging backend to the manager.
@@ -317,6 +403,12 @@ func (m *Manager) DeleteTpl(id int) {
 	m.tplsMut.Unlock()
 }
 
+func (m *Manager) randInt63() int64 {
+	m.randMu.Lock()
+	defer m.randMu.Unlock()
+	return m.rng.Int63()
+}
+
 // GetTpl returns a cached template.
 func (m *Manager) GetTpl(id int) (*models.Template, error) {
 	m.tplsMut.RLock()
@@ -453,6 +545,10 @@ func (m *Manager) worker() {
 				continue
 			}
 
+			if msg.pipe != nil {
+				defer msg.pipe.wg.Done()
+			}
+
 			// Pause on hitting the message rate.
 			if numMsg >= m.cfg.MessageRate {
 				time.Sleep(time.Second)
@@ -495,17 +591,51 @@ func (m *Manager) worker() {
 			// Set the headers.
 			out.Headers = h
 
+			// Ensure we have a stable Message-Id so replies can be matched via In-Reply-To/References.
+			// If not present, generate one using the domain from the From address.
+			messageID := strings.TrimSpace(out.Headers.Get(models.EmailHeaderMessageId))
+			if messageID == "" {
+				// Derive domain from From address
+				_, fromEmail := parseFromNameEmail(msg.from)
+				domain := ""
+				if i := strings.LastIndex(fromEmail, "@"); i > -1 && i+1 < len(fromEmail) {
+					domain = strings.ToLower(strings.TrimSpace(fromEmail[i+1:]))
+				}
+				if domain == "" {
+					domain = "localhost"
+				}
+				messageID = fmt.Sprintf("<%d.%d@%s>", time.Now().UnixNano(), m.randInt63(), domain)
+				out.Headers.Set(models.EmailHeaderMessageId, messageID)
+			}
+
+			// For sequence campaigns with personas, persist stable from_email per subscriber on first set.
+			if msg.Campaign.Type == models.CampaignTypeSequence && msg.from != "" {
+				// Extract email part
+				_, email := parseFromNameEmail(msg.from)
+				if email != "" {
+					_ = m.store.SetSequenceFromEmail(msg.Campaign.ID, msg.Subscriber.ID, email)
+				}
+			}
+
 			// Push the message to the messenger.
 			err := m.messengers[msg.Campaign.Messenger].Push(out)
+			if err != nil && errors.Is(err, email.ErrDailyLimitReached) {
+				if msg.pipe != nil {
+					msg.pipe.pauseForDailyLimit()
+					msg.pipe.wg.Done()
+				}
+				continue
+			}
 			if err != nil {
 				m.log.Printf("error sending message in campaign %s: subscriber %d: %v", msg.Campaign.Name, msg.Subscriber.ID, err)
+				// Record failed send
+				_ = m.store.RecordSend(msg.Campaign.ID, msg.Subscriber.ID, -1, msg.Subject(), msg.from, false, err.Error(), "", "")
+				// Also record a bounce using bounce settings.
+				_ = m.store.RecordImmediateBounce(msg.Subscriber, msg.Campaign, err)
 			}
 
 			// Increment the send rate or the error counter if there was an error.
 			if msg.pipe != nil {
-				// Mark the message as done.
-				msg.pipe.wg.Done()
-
 				if err != nil {
 					// Call the error callback, which keeps track of the error count
 					// and stops the campaign if the error count exceeds the threshold.
@@ -514,9 +644,28 @@ func (m *Manager) worker() {
 					id := uint64(msg.Subscriber.ID)
 					if id > msg.pipe.lastID.Load() {
 						msg.pipe.lastID.Store(uint64(msg.Subscriber.ID))
+						msg.pipe.wg.Done()
 					}
 					msg.pipe.rate.Incr(1)
 					msg.pipe.sent.Add(1)
+					// For sequence campaigns, advance per-subscriber progress.
+					if msg.Campaign.Type == models.CampaignTypeSequence {
+						// Compute next step time.
+						nextAt, done := computeNextSequenceTime(msg)
+						if e := m.store.AdvanceSequenceProgress(msg.Campaign.ID, msg.Subscriber.ID, msg.StepIndex+1, nextAt, done); e != nil {
+							m.log.Printf("error advancing sequence progress: %v", e)
+						}
+					}
+
+					// Record send event for recent sends page.
+					stepNum := -1
+					if msg.Campaign.Type == models.CampaignTypeSequence {
+						stepNum = msg.StepIndex + 1
+					}
+					_ = m.store.RecordSend(msg.Campaign.ID, msg.Subscriber.ID, stepNum, msg.Subject(), msg.from, true, "", "", messageID)
+					if msg.SlotID > 0 {
+						_ = m.store.CampSchedMarkDoneEmail(msg.SlotID, msg.to, msg.from, msg.Subject())
+					}
 				}
 			}
 
@@ -550,8 +699,7 @@ func (m *Manager) getCurrentCampaigns() ([]int64, []int64) {
 
 		// Get the sent counts for campaigns and reset them to 0
 		// as in the database, they're stored cumulatively (sent += $newSent).
-		counts = append(counts, p.sent.Load())
-		p.sent.Store(0)
+		counts = append(counts, p.sent.Swap(0))
 	}
 
 	return ids, counts

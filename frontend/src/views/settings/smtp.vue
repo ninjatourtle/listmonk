@@ -275,6 +275,8 @@ export default Vue.extend({
         wait_timeout: '5s',
         tls_type: 'STARTTLS',
         tls_skip_verify: false,
+        daily_limit: 0,
+        send_pause: '0s',
       });
 
       this.$nextTick(() => {

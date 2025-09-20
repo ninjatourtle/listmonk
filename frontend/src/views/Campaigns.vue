@@ -126,13 +126,25 @@
             <label for="#">{{ $t('campaigns.clicks') }}</label>
             <span>{{ $utils.formatNumber(props.row.clicks) }}</span>
           </p>
-          <p>
-            <label for="#">{{ $t('campaigns.sent') }}</label>
-            <span>
-              {{ $utils.formatNumber(stats.sent) }} /
-              {{ $utils.formatNumber(stats.toSend) }}
-            </span>
-          </p>
+          <template v-if="props.row.type === 'sequence'">
+            <p>
+              <label for="#">{{ $t('campaigns.sentMessages') }}</label>
+              <span>{{ $utils.formatNumber(stats.sent) }}</span>
+            </p>
+            <p>
+              <label for="#">{{ $t('campaigns.uniqueRecipients') }}</label>
+              <span>{{ $utils.formatNumber(stats.toSend) }}</span>
+            </p>
+          </template>
+          <template v-else>
+            <p>
+              <label for="#">{{ $t('campaigns.sent') }}</label>
+              <span>
+                {{ $utils.formatNumber(stats.sent) }} /
+                {{ $utils.formatNumber(stats.toSend) }}
+              </span>
+            </p>
+          </template>
           <p>
             <label for="#">{{ $t('globals.terms.bounces') }}</label>
             <span>
@@ -151,7 +163,7 @@
               </b-tooltip>
             </span>
           </p>
-          <p v-if="isRunning(props.row.id)">
+          <p v-if="isRunning(props.row.id) && stats.toSend > 0">
             <label for="#">
               {{ $t('campaigns.progress') }}
               <span class="spinner is-tiny">
@@ -241,11 +253,22 @@
               <b-icon icon="chart-bar" size="is-small" />
             </b-tooltip>
           </router-link>
+          <router-link :to="{ name: 'campaignSchedule', query: { campaign_id: props.row.id } }">
+            <b-tooltip :label="$t('campaigns.schedule.title') || 'Расписание'" type="is-dark">
+              <b-icon icon="calendar" size="is-small" />
+            </b-tooltip>
+          </router-link>
           <a v-if="$can('campaigns:manage')" href="#"
             @click.prevent="$utils.confirm($t('campaigns.confirmDelete', { name: props.row.name }), () => deleteCampaign(props.row))"
             data-cy="btn-delete" :aria-label="$t('globals.buttons.delete')">
             <b-icon icon="trash-can-outline" size="is-small" />
           </a>
+          <router-link v-if="$can('campaigns:get_analytics')"
+            :to="{ name: 'campaignDeliveries', params: { id: props.row.id } }"
+            class="button is-small is-light is-link ml-2">
+            <b-icon icon="format-list-bulleted-square" size="is-small" />
+            <span class="ml-1">{{ $t('campaigns.deliveries') }}</span>
+          </router-link>
         </div>
       </b-table-column>
 

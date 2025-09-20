@@ -4,7 +4,7 @@
       icon="view-dashboard-variant-outline" :label="$t('menu.dashboard')" /><!-- dashboard -->
 
     <b-menu-item v-if="$can('settings:get')" :to="{ name: 'smtpStats' }" tag="router-link"
-      :active="activeItem.smtpStats" data-cy="smtp-stats" icon="email" :label="$t('menu.smtpStats')" />
+      :active="activeItem.smtpStats" data-cy="smtp-stats" icon="chart-bar" :label="$t('menu.smtpStats')" />
 
     <b-menu-item :expanded="activeGroup.lists" :active="activeGroup.lists" data-cy="lists"
       @update:active="(state) => toggleGroup('lists', state)" icon="format-list-bulleted-square"
@@ -43,6 +43,12 @@
       <b-menu-item v-if="$can('campaigns:get_analytics')" :to="{ name: 'campaignAnalytics' }" tag="router-link"
         :active="activeItem.campaignAnalytics" data-cy="analytics" icon="chart-bar"
         :label="$t('globals.terms.analytics')" />
+      <b-menu-item v-if="$can('campaigns:get_analytics')" :to="{ name: 'recentSends' }" tag="router-link"
+        :active="activeItem.recentSends" data-cy="recent-sends" icon="view-dashboard-variant-outline"
+        :label="$t('menu.recentSends')" />
+      <b-menu-item :to="{ name: 'campaignSchedule' }" tag="router-link"
+        :active="activeItem.campaignSchedule" data-cy="campaign-schedule" icon="calendar"
+        :label="$t('campaigns.schedule.title') || 'Расписание кампаний'" />
     </b-menu-item><!-- campaigns -->
 
     <b-menu-item v-if="$can('users:*', 'roles:*')" :expanded="activeGroup.users" :active="activeGroup.users"
